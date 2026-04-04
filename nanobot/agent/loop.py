@@ -625,6 +625,7 @@ class AgentLoop:
         self._schedule_background(self._update_context_summary(session, all_msgs, history))
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
+            # Message tool already sent content - don't send duplicate final response
             return None
 
         preview = final_content[:1000] + "..." if len(final_content) > 1000 else final_content

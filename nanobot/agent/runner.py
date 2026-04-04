@@ -266,6 +266,11 @@ class AgentRunner:
                 await hook.after_iteration(context)
                 break
 
+            # Track the last response that is NOT a completion confirmation
+            # This must happen BEFORE the completion check so we capture the actual results
+            if not is_completion_confirmed(clean)[0]:
+                last_real_response = clean
+
             if spec.max_completion_checks > 0 and completion_check_rounds < spec.max_completion_checks:
                 confirmed, answer = is_completion_confirmed(clean)
                 if not confirmed:
@@ -290,8 +295,6 @@ class AgentRunner:
                 context.stop_reason = stop_reason
                 await hook.after_iteration(context)
                 break
-
-            last_real_response = clean
 
             messages.append(build_assistant_message(
                 clean,
