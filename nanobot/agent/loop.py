@@ -542,6 +542,9 @@ class AgentLoop:
             await self.consolidator.maybe_consolidate_by_tokens(session)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=0)
+            history_len = len(history)  # Track before potentially clearing
+            history = self._maybe_initialize_context_summary(history)
+
             current_role = "assistant" if msg.sender_id == "subagent" else "user"
             messages = self.context.build_messages(
                 history=history,
@@ -552,7 +555,7 @@ class AgentLoop:
                 messages, session=session, channel=channel, chat_id=chat_id,
                 message_id=msg.metadata.get("message_id"),
             )
-            self._save_turn(session, all_msgs, 1 + len(history))
+            self._save_turn(session, all_msgs, 1 + history_len)
             self._clear_runtime_checkpoint(session)
             self.sessions.save(session)
             self._schedule_background(self.consolidator.maybe_consolidate_by_tokens(session))
@@ -582,6 +585,9 @@ class AgentLoop:
                 message_tool.start_turn()
 
         history = session.get_history(max_messages=0)
+        history_len = len(history)  # Track before potentially clearing
+        history = self._maybe_initialize_context_summary(history)
+
         initial_messages = self.context.build_messages(
             history=history,
             current_message=msg.content,
@@ -610,7 +616,7 @@ class AgentLoop:
         if final_content is None or not final_content.strip():
             final_content = EMPTY_FINAL_RESPONSE_MESSAGE
 
-        self._save_turn(session, all_msgs, 1 + len(history))
+        self._save_turn(session, all_msgs, 1 + history_len)
         self._clear_runtime_checkpoint(session)
         self.sessions.save(session)
         self._schedule_background(self.consolidator.maybe_consolidate_by_tokens(session))
@@ -749,6 +755,26 @@ class AgentLoop:
             )
         except Exception as exc:
             logger.warning("Failed to update context summary: {}", exc)
+
+    def _maybe_initialize_context_summary(
+        self,
+        history: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Initialize context summary from history if needed, return cleared history."""
+        context_summary = self.context.memory.load_context_summary()
+        if not context_summary:
+            if history:
+                initial_summary = f"Session started.\n\n"
+                for m in history[:5]:
+                    role = m.get("role", "?").upper()
+                    content = m.get("content", "")
+                    if isinstance(content, str) and len(content) > 200:
+                        content = content[:200] + "..."
+                    initial_summary += f"- [{role}] {content}\n"
+                self.context.memory.save_context_summary(initial_summary)
+                logger.info("Initial context summary created")
+            return []  # Clear history after creating summary
+        return []  # No summary needed, clear history anyway
 
     def _clear_runtime_checkpoint(self, session: Session) -> None:
         if self._RUNTIME_CHECKPOINT_KEY in session.metadata:

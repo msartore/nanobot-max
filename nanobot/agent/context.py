@@ -40,7 +40,13 @@ class ContextBuilder:
 
         context_summary = self.memory.load_context_summary()
         if context_summary:
-            parts.append(f"# Context Summary\n\n{context_summary}")
+            parts.append(
+                f"# Context Summary\n\n"
+                f"{context_summary}\n\n"
+                f"---\n\n"
+                f"<note>If you need more context, you can read the session history from "
+                f"the sessions directory using the read_file tool.</note>"
+            )
 
         always_skills = self.skills.get_always_skills()
         if always_skills:
