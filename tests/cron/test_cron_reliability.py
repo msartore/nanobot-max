@@ -214,7 +214,8 @@ async def test_retry_backoff_on_job_failure(tmp_path):
 
     assert job.state.last_status == "error"
     assert job.state.retry_count == 1
-    expected_backoff_ms = now + 120 * 1000
+    # Formula: 2^retry_count * 30s = 2^1 * 30 = 60s
+    expected_backoff_ms = now + 60 * 1000
     assert job.state.next_run_at_ms >= expected_backoff_ms - 1000
 
 

@@ -317,7 +317,7 @@ class AgentRunner:
                 # on_stream_end was already called in the previous (not-confirmed) iteration.
                 if hook.wants_streaming() and _streaming_this_iter:
                     await hook.on_stream_end(context, resuming=False)
-                final_content = last_real_response
+                final_content = last_real_response if last_real_response is not None else clean
                 context.final_content = final_content
                 context.stop_reason = stop_reason
                 await hook.after_iteration(context)

@@ -57,6 +57,7 @@ class TestMessageToolSuppressLogic:
         calls = iter([
             LLMResponse(content="", tool_calls=[tool_call]),
             LLMResponse(content="I've sent the email.", tool_calls=[]),
+            LLMResponse(content="DONE: I've sent the email.", tool_calls=[]),
         ])
         loop.provider.chat_with_retry = AsyncMock(side_effect=lambda *a, **kw: next(calls))
         loop.tools.get_definitions = MagicMock(return_value=[])
@@ -71,7 +72,7 @@ class TestMessageToolSuppressLogic:
 
         assert len(sent) == 1
         assert sent[0].channel == "email"
-        assert result is not None  # not suppressed
+        assert result is not None
         assert result.channel == "feishu"
 
     @pytest.mark.asyncio
@@ -97,6 +98,7 @@ class TestMessageToolSuppressLogic:
                 thinking_blocks=[{"signature": "sig", "thought": "secret thought"}],
             ),
             LLMResponse(content="Done", tool_calls=[]),
+            LLMResponse(content="DONE: Done", tool_calls=[]),
         ])
         loop.provider.chat_with_retry = AsyncMock(side_effect=lambda *a, **kw: next(calls))
         loop.tools.get_definitions = MagicMock(return_value=[])
