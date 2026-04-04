@@ -1,5 +1,6 @@
 """Message tool for sending messages to users."""
 
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from nanobot.agent.tools.base import Tool, tool_parameters
@@ -28,11 +29,13 @@ class MessageTool(Tool):
         default_channel: str = "",
         default_chat_id: str = "",
         default_message_id: str | None = None,
+        workspace: Path | None = None,
     ):
         self._send_callback = send_callback
         self._default_channel = default_channel
         self._default_chat_id = default_chat_id
         self._default_message_id = default_message_id
+        self._workspace = workspace
         self._sent_in_turn: bool = False
 
     def set_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
@@ -48,6 +51,20 @@ class MessageTool(Tool):
     def start_turn(self) -> None:
         """Reset per-turn send tracking."""
         self._sent_in_turn = False
+
+    def _resolve_media(self, media: list[str] | None) -> list[str]:
+        """Resolve relative media paths against the workspace."""
+        if not media:
+            return []
+        if not self._workspace:
+            return media
+        resolved = []
+        for path in media:
+            p = Path(path).expanduser()
+            if not p.is_absolute():
+                p = self._workspace / p
+            resolved.append(str(p.resolve()))
+        return resolved
 
     @property
     def name(self) -> str:
@@ -92,11 +109,12 @@ class MessageTool(Tool):
         if not self._send_callback:
             return "Error: Message sending not configured"
 
+        resolved_media = self._resolve_media(media)
         msg = OutboundMessage(
             channel=channel,
             chat_id=chat_id,
             content=content,
-            media=media or [],
+            media=resolved_media,
             metadata={
                 "message_id": message_id,
             } if message_id else {},
@@ -106,7 +124,7 @@ class MessageTool(Tool):
             await self._send_callback(msg)
             if channel == self._default_channel and chat_id == self._default_chat_id:
                 self._sent_in_turn = True
-            media_info = f" with {len(media)} attachments" if media else ""
+            media_info = f" with {len(resolved_media)} attachments" if resolved_media else ""
             return f"Message sent to {channel}:{chat_id}{media_info}"
         except Exception as e:
             return f"Error sending message: {str(e)}"

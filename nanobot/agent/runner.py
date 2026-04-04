@@ -92,8 +92,13 @@ class AgentRunner:
         tool_events: list[dict[str, str]] = []
         external_lookup_counts: dict[str, int] = {}
         completion_check_rounds = 0
+        _suppress_streaming = False  # True when next call is a completion-check confirmation
 
         for iteration in range(spec.max_iterations):
+            # Capture and reset the per-iteration streaming suppression flag.
+            # Completion-check confirmation calls should not stream to the user.
+            _streaming_this_iter = not _suppress_streaming
+            _suppress_streaming = False
             try:
                 messages = self._apply_tool_result_budget(spec, messages)
                 messages_for_model = self._snip_history(spec, messages)
@@ -107,7 +112,10 @@ class AgentRunner:
                 messages_for_model = messages
             context = AgentHookContext(iteration=iteration, messages=messages)
             await hook.before_iteration(context)
-            response = await self._request_model(spec, messages_for_model, hook, context)
+            response = await self._request_model(
+                spec, messages_for_model, hook, context,
+                skip_stream=not _streaming_this_iter,
+            )
             raw_usage = self._usage_dict(response.usage)
             context.response = response
             context.usage = dict(raw_usage)
@@ -194,9 +202,13 @@ class AgentRunner:
                     iteration,
                     spec.session_key or "default",
                 )
-                if hook.wants_streaming():
+                if hook.wants_streaming() and _streaming_this_iter:
                     await hook.on_stream_end(context, resuming=False)
-                response = await self._request_finalization_retry(spec, messages_for_model)
+                response = await self._request_finalization_retry(
+                    spec, messages_for_model,
+                    hook=hook if _streaming_this_iter else None,
+                    context=context if _streaming_this_iter else None,
+                )
                 retry_usage = self._usage_dict(response.usage)
                 self._accumulate_usage(usage, retry_usage)
                 raw_usage = self._merge_usage(raw_usage, retry_usage)
@@ -205,8 +217,10 @@ class AgentRunner:
                 context.tool_calls = list(response.tool_calls)
                 clean = hook.finalize_content(context, response.content)
 
-            if hook.wants_streaming():
-                await hook.on_stream_end(context, resuming=False)
+            # NOTE: on_stream_end is intentionally NOT called unconditionally here.
+            # Each decision branch below calls it with the right resuming flag so that:
+            # - real content is finalized before a completion-check continuation
+            # - the confirmation-check call is run non-streaming (_suppress_streaming)
 
             if response.finish_reason == "error":
                 error_detail = clean or spec.error_message or _DEFAULT_ERROR_MESSAGE
@@ -253,9 +267,13 @@ class AgentRunner:
                         "role": "user",
                         "content": f"The previous request failed with: {error_detail[:500]}. Please continue with your task using the conversation above."
                     })
+                if hook.wants_streaming() and _streaming_this_iter:
+                    await hook.on_stream_end(context, resuming=True)
                 await hook.after_iteration(context)
                 continue
             if is_blank_text(clean):
+                if hook.wants_streaming() and _streaming_this_iter:
+                    await hook.on_stream_end(context, resuming=False)
                 final_content = EMPTY_FINAL_RESPONSE_MESSAGE
                 stop_reason = "empty_final_response"
                 error = final_content
@@ -266,14 +284,20 @@ class AgentRunner:
                 await hook.after_iteration(context)
                 break
 
-            # Track the last response that is NOT a completion confirmation
-            # This must happen BEFORE the completion check so we capture the actual results
-            if not is_completion_confirmed(clean)[0]:
+            # Track the last real response (with actual content, not meta-summaries)
+            # A "real response" has tool calls or is not a completion confirmation
+            has_tool_calls = bool(response.tool_calls)
+            is_done_prefix = is_completion_confirmed(clean)[0]
+            if has_tool_calls or not is_done_prefix:
                 last_real_response = clean
 
             if spec.max_completion_checks > 0 and completion_check_rounds < spec.max_completion_checks:
-                confirmed, answer = is_completion_confirmed(clean)
-                if not confirmed:
+                if not is_done_prefix:
+                    # Finalize the real content stream now, then suppress streaming for
+                    # the next (confirmation-check) call so it doesn't reach the user.
+                    if hook.wants_streaming() and _streaming_this_iter:
+                        await hook.on_stream_end(context, resuming=False)
+                    _suppress_streaming = True
                     completion_check_rounds += 1
                     logger.info(
                         "Completion check round {} for {}; task not confirmed complete, continuing",
@@ -289,13 +313,18 @@ class AgentRunner:
                     await hook.after_iteration(context)
                     continue
 
-                # Task is confirmed complete — use the last real response, not the meta-summary
-                final_content = last_real_response or clean
+                # Task is confirmed complete — use the last real response, not the meta-summary.
+                # on_stream_end was already called in the previous (not-confirmed) iteration.
+                if hook.wants_streaming() and _streaming_this_iter:
+                    await hook.on_stream_end(context, resuming=False)
+                final_content = last_real_response
                 context.final_content = final_content
                 context.stop_reason = stop_reason
                 await hook.after_iteration(context)
                 break
 
+            if hook.wants_streaming() and _streaming_this_iter:
+                await hook.on_stream_end(context, resuming=False)
             messages.append(build_assistant_message(
                 clean,
                 reasoning_content=response.reasoning_content,
@@ -369,13 +398,15 @@ class AgentRunner:
         messages: list[dict[str, Any]],
         hook: AgentHook,
         context: AgentHookContext,
+        *,
+        skip_stream: bool = False,
     ):
         kwargs = self._build_request_kwargs(
             spec,
             messages,
             tools=spec.tools.get_definitions(),
         )
-        if hook.wants_streaming():
+        if hook.wants_streaming() and not skip_stream:
             async def _stream(delta: str) -> None:
                 await hook.on_stream(context, delta)
 
@@ -389,10 +420,17 @@ class AgentRunner:
         self,
         spec: AgentRunSpec,
         messages: list[dict[str, Any]],
+        *,
+        hook: AgentHook | None = None,
+        context: AgentHookContext | None = None,
     ):
         retry_messages = list(messages)
         retry_messages.append(build_finalization_retry_message())
         kwargs = self._build_request_kwargs(spec, retry_messages, tools=None)
+        if hook is not None and hook.wants_streaming() and context is not None:
+            async def _stream(delta: str) -> None:
+                await hook.on_stream(context, delta)
+            return await self.provider.chat_stream_with_retry(**kwargs, on_content_delta=_stream)
         return await self.provider.chat_with_retry(**kwargs)
 
     _INPUT_VALIDATION_ERROR_MARKERS = (
