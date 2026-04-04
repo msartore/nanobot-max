@@ -571,12 +571,8 @@ class AgentRunner:
         if len(non_system) <= 4:
             return messages
 
-        user_messages = [msg for msg in non_system if msg.get("role") == "user"]
-        assistant_messages = [msg for msg in non_system if msg.get("role") == "assistant" and not msg.get("tool_calls")]
-        tool_messages = [msg for msg in non_system if msg.get("role") == "tool"]
-
-        first_user = user_messages[0] if user_messages else None
-        recent_count = min(6, len(non_system))
+        first_user = next((m for m in non_system if m.get("role") == "user"), None)
+        recent_count = min(4, len(non_system))
         recent_messages = non_system[-recent_count:]
 
         compactable = non_system[:-recent_count]
@@ -591,11 +587,21 @@ class AgentRunner:
             iteration, estimate, spec.context_compact_threshold_tokens, len(compactable),
         )
 
-        summary_text = "\n\n".join(
-            f"[{m.get('role', '?').upper()}] {m.get('content', '')}"
-            for m in compactable
-            if m.get('content')
-        )
+        summary_lines = []
+        for m in compactable:
+            role = m.get("role", "?").upper()
+            content = m.get("content", "")
+            if role == "TOOL":
+                name = m.get("name", "tool")
+                if isinstance(content, str) and len(content) > 200:
+                    content = content[:200] + "...[truncated]"
+                summary_lines.append(f"[{role}:{name}] {content}")
+            elif content:
+                if isinstance(content, str) and len(content) > 500:
+                    content = content[:500] + "...[truncated]"
+                summary_lines.append(f"[{role}] {content}")
+
+        summary_text = "\n".join(summary_lines)[:8000]
 
         try:
             response = await self.provider.chat_with_retry(
@@ -604,22 +610,20 @@ class AgentRunner:
                     {
                         "role": "system",
                         "content": (
-                            "You are a context compaction assistant. "
-                            "Summarize the following conversation history into a concise summary. "
-                            "Include: the original task, key decisions made, tool results obtained, "
-                            "and current progress state. Omit redundant details and verbose outputs. "
-                            "Keep all important facts, code snippets, and file paths. "
-                            "Format as a structured summary with clear sections."
+                            "Summarize this conversation history concisely. "
+                            "Include: original task, key decisions, tool results, current progress. "
+                            "Keep important facts, code snippets, file paths. "
+                            "Use bullet points. Be brief."
                         ),
                     },
-                    {"role": "user", "content": summary_text[:30000]},
+                    {"role": "user", "content": summary_text},
                 ],
                 tools=None,
                 tool_choice=None,
-                max_tokens=2048,
+                max_tokens=1024,
                 temperature=0,
             )
-            summary = response.content or "[compaction failed - original context preserved]"
+            summary = response.content or "[compaction failed]"
         except Exception as exc:
             logger.warning("Context compaction LLM call failed: {}", exc)
             summary = "[compaction skipped due to error]"
@@ -629,7 +633,27 @@ class AgentRunner:
             "content": f"[COMPACTED CONTEXT - {len(compactable)} messages summarized]\n\n{summary}",
         }
 
-        return system_messages + [compacted_message] + recent_messages
+        result = system_messages + [compacted_message] + recent_messages
+
+        try:
+            post_estimate, _ = estimate_prompt_tokens_chain(
+                self.provider,
+                spec.model,
+                result,
+                spec.tools.get_definitions(),
+            )
+            logger.info(
+                "Context compaction reduced context from {} to {} tokens",
+                estimate, post_estimate,
+            )
+
+            if post_estimate >= estimate * 0.9:
+                logger.warning("Compaction did not sufficiently reduce context; falling back to snipping")
+                return self._snip_history(spec, messages)
+        except Exception:
+            pass
+
+        return result
 
     def _snip_history(
         self,
