@@ -84,6 +84,7 @@ class AgentRunner:
         hook = spec.hook or AgentHook()
         messages = list(spec.initial_messages)
         final_content: str | None = None
+        last_real_response: str | None = None
         tools_used: list[str] = []
         usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
         error: str | None = None
@@ -283,8 +284,14 @@ class AgentRunner:
                     await hook.after_iteration(context)
                     continue
 
-                if answer:
-                    clean = answer
+                # Task is confirmed complete — use the last real response, not the meta-summary
+                final_content = last_real_response or clean
+                context.final_content = final_content
+                context.stop_reason = stop_reason
+                await hook.after_iteration(context)
+                break
+
+            last_real_response = clean
 
             messages.append(build_assistant_message(
                 clean,
