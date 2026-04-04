@@ -209,15 +209,24 @@ class AgentRunner:
                 await hook.on_stream_end(context, resuming=False)
 
             if response.finish_reason == "error":
-                final_content = clean or spec.error_message or _DEFAULT_ERROR_MESSAGE
-                stop_reason = "error"
-                error = final_content
-                self._append_final_message(messages, final_content)
-                context.final_content = final_content
-                context.error = error
-                context.stop_reason = stop_reason
+                error_detail = clean or spec.error_message or _DEFAULT_ERROR_MESSAGE
+                logger.warning(
+                    "LLM returned error on turn {} for {}: {}; retrying with error context",
+                    iteration,
+                    spec.session_key or "default",
+                    error_detail[:200],
+                )
+                messages.append(build_assistant_message(
+                    "(LLM error occurred, retrying...)",
+                    reasoning_content=response.reasoning_content,
+                    thinking_blocks=response.thinking_blocks,
+                ))
+                messages.append({
+                    "role": "user",
+                    "content": f"The previous request failed with: {error_detail[:500]}. Please continue with your task using the conversation above."
+                })
                 await hook.after_iteration(context)
-                break
+                continue
             if is_blank_text(clean):
                 final_content = EMPTY_FINAL_RESPONSE_MESSAGE
                 stop_reason = "empty_final_response"
@@ -557,7 +566,7 @@ class AgentRunner:
         if iteration == 0:
             return messages
 
-        estimate, _ = estimate_prompt_tokens_chain(
+        estimate, source = estimate_prompt_tokens_chain(
             self.provider,
             spec.model,
             messages,
@@ -566,13 +575,19 @@ class AgentRunner:
         if estimate < spec.context_compact_threshold_tokens:
             return messages
 
+        logger.info(
+            "Context compaction triggered at iteration {} ({} tokens > {} threshold via {}); {} total messages",
+            iteration, estimate, spec.context_compact_threshold_tokens, source, len(messages),
+        )
+
         system_messages = [msg for msg in messages if msg.get("role") == "system"]
         non_system = [msg for msg in messages if msg.get("role") != "system"]
-        if len(non_system) <= 4:
+        if len(non_system) <= 6:
+            logger.info("Context compaction skipped: too few non-system messages ({})", len(non_system))
             return messages
 
         first_user = next((m for m in non_system if m.get("role") == "user"), None)
-        recent_count = min(4, len(non_system))
+        recent_count = min(2, len(non_system))
         recent_messages = non_system[-recent_count:]
 
         compactable = non_system[:-recent_count]
@@ -580,28 +595,29 @@ class AgentRunner:
             compactable = [first_user] + [m for m in compactable if m != first_user]
 
         if not compactable:
+            logger.info("Context compaction skipped: no messages to compact")
             return messages
 
-        logger.info(
-            "Context compaction triggered at iteration {} ({} tokens > {} threshold); compacting {} messages",
-            iteration, estimate, spec.context_compact_threshold_tokens, len(compactable),
-        )
+        logger.info("Compacting {} messages down to summary + {} recent messages", len(compactable), recent_count)
 
         summary_lines = []
+        tool_count = 0
         for m in compactable:
             role = m.get("role", "?").upper()
             content = m.get("content", "")
             if role == "TOOL":
+                tool_count += 1
                 name = m.get("name", "tool")
-                if isinstance(content, str) and len(content) > 200:
-                    content = content[:200] + "...[truncated]"
+                if isinstance(content, str) and len(content) > 150:
+                    content = content[:150] + "...[truncated]"
                 summary_lines.append(f"[{role}:{name}] {content}")
             elif content:
-                if isinstance(content, str) and len(content) > 500:
-                    content = content[:500] + "...[truncated]"
+                if isinstance(content, str) and len(content) > 300:
+                    content = content[:300] + "...[truncated]"
                 summary_lines.append(f"[{role}] {content}")
 
-        summary_text = "\n".join(summary_lines)[:8000]
+        summary_text = "\n".join(summary_lines)[:6000]
+        logger.info("Compaction input: {} lines, {} chars ({} tool calls)", len(summary_lines), len(summary_text), tool_count)
 
         try:
             response = await self.provider.chat_with_retry(
@@ -623,10 +639,16 @@ class AgentRunner:
                 max_tokens=1024,
                 temperature=0,
             )
+            if response.finish_reason == "error":
+                logger.warning("Compaction LLM call returned error: {}", (response.content or "")[:200])
+                logger.info("Falling back to snipping")
+                return self._snip_history(spec, messages)
             summary = response.content or "[compaction failed]"
+            logger.info("Compaction LLM returned {} chars", len(summary))
         except Exception as exc:
             logger.warning("Context compaction LLM call failed: {}", exc)
-            summary = "[compaction skipped due to error]"
+            logger.info("Falling back to snipping")
+            return self._snip_history(spec, messages)
 
         compacted_message = {
             "role": "system",
@@ -642,16 +664,20 @@ class AgentRunner:
                 result,
                 spec.tools.get_definitions(),
             )
+            reduction_pct = (1 - post_estimate / estimate) * 100 if estimate > 0 else 0
             logger.info(
-                "Context compaction reduced context from {} to {} tokens",
-                estimate, post_estimate,
+                "Context compaction result: {} -> {} tokens ({:.0f}% reduction)",
+                estimate, post_estimate, reduction_pct,
             )
 
             if post_estimate >= estimate * 0.9:
-                logger.warning("Compaction did not sufficiently reduce context; falling back to snipping")
+                logger.warning(
+                    "Compaction did not sufficiently reduce context ({} tokens remaining); falling back to snipping",
+                    post_estimate,
+                )
                 return self._snip_history(spec, messages)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Could not estimate post-compaction tokens: {}", exc)
 
         return result
 
