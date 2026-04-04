@@ -558,6 +558,8 @@ def serve(
         mcp_servers=runtime_config.tools.mcp_servers,
         channels_config=runtime_config.channels,
         timezone=runtime_config.agents.defaults.timezone,
+        max_completion_checks=runtime_config.agents.defaults.max_completion_checks,
+        context_compact_threshold_tokens=runtime_config.agents.defaults.context_compact_threshold_tokens,
     )
 
     model_name = runtime_config.agents.defaults.model
@@ -648,6 +650,8 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
+        max_completion_checks=config.agents.defaults.max_completion_checks,
+        context_compact_threshold_tokens=config.agents.defaults.context_compact_threshold_tokens,
     )
 
     # Set cron callback (needs agent)
@@ -879,6 +883,8 @@ def agent(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
+        max_completion_checks=config.agents.defaults.max_completion_checks,
+        context_compact_threshold_tokens=config.agents.defaults.context_compact_threshold_tokens,
     )
     restart_notice = consume_restart_notice_from_env()
     if restart_notice and should_show_cli_restart_notice(restart_notice, session_id):

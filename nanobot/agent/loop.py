@@ -180,6 +180,8 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         timezone: str | None = None,
         hooks: list[AgentHook] | None = None,
+        max_completion_checks: int | None = None,
+        context_compact_threshold_tokens: int | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebToolsConfig
 
@@ -204,6 +206,16 @@ class AgentLoop:
             else defaults.max_tool_result_chars
         )
         self.provider_retry_mode = provider_retry_mode
+        self.max_completion_checks = (
+            max_completion_checks
+            if max_completion_checks is not None
+            else defaults.max_completion_checks
+        )
+        self.context_compact_threshold_tokens = (
+            context_compact_threshold_tokens
+            if context_compact_threshold_tokens is not None
+            else defaults.context_compact_threshold_tokens
+        )
         self.web_config = web_config or WebToolsConfig()
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
@@ -383,9 +395,11 @@ class AgentLoop:
             session_key=session.key if session else None,
             context_window_tokens=self.context_window_tokens,
             context_block_limit=self.context_block_limit,
+            context_compact_threshold_tokens=self.context_compact_threshold_tokens,
             provider_retry_mode=self.provider_retry_mode,
             progress_callback=on_progress,
             checkpoint_callback=_checkpoint,
+            max_completion_checks=self.max_completion_checks,
         ))
         self._last_usage = result.usage
         if result.stop_reason == "max_iterations":

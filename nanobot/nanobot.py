@@ -81,6 +81,8 @@ class Nanobot:
             restrict_to_workspace=config.tools.restrict_to_workspace,
             mcp_servers=config.tools.mcp_servers,
             timezone=defaults.timezone,
+            max_completion_checks=defaults.max_completion_checks,
+            context_compact_threshold_tokens=defaults.context_compact_threshold_tokens,
         )
         return cls(loop)
 

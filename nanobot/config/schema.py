@@ -72,6 +72,8 @@ class AgentDefaults(Base):
     temperature: float = 0.1
     max_tool_iterations: int = 200
     max_tool_result_chars: int = 16_000
+    max_completion_checks: int = 0
+    context_compact_threshold_tokens: int | None = None
     provider_retry_mode: Literal["standard", "persistent"] = "standard"
     reasoning_effort: str | None = None  # low / medium / high - enables LLM thinking mode
     timezone: str = "UTC"  # IANA timezone, e.g. "Asia/Shanghai", "America/New_York"

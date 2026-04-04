@@ -24,8 +24,10 @@ from nanobot.utils.helpers import (
 from nanobot.utils.runtime import (
     EMPTY_FINAL_RESPONSE_MESSAGE,
     build_finalization_retry_message,
+    build_completion_check_message,
     ensure_nonempty_tool_result,
     is_blank_text,
+    is_completion_confirmed,
     repeated_external_lookup_error,
 )
 
@@ -52,9 +54,11 @@ class AgentRunSpec:
     session_key: str | None = None
     context_window_tokens: int | None = None
     context_block_limit: int | None = None
+    context_compact_threshold_tokens: int | None = None
     provider_retry_mode: str = "standard"
     progress_callback: Any | None = None
     checkpoint_callback: Any | None = None
+    max_completion_checks: int = 0
 
 
 @dataclass(slots=True)
@@ -86,10 +90,12 @@ class AgentRunner:
         stop_reason = "completed"
         tool_events: list[dict[str, str]] = []
         external_lookup_counts: dict[str, int] = {}
+        completion_check_rounds = 0
 
         for iteration in range(spec.max_iterations):
             try:
                 messages = self._apply_tool_result_budget(spec, messages)
+                messages = await self._maybe_compact_context(spec, messages, iteration)
                 messages_for_model = self._snip_history(spec, messages)
             except Exception as exc:
                 logger.warning(
@@ -222,6 +228,27 @@ class AgentRunner:
                 context.stop_reason = stop_reason
                 await hook.after_iteration(context)
                 break
+
+            if spec.max_completion_checks > 0 and completion_check_rounds < spec.max_completion_checks:
+                confirmed, answer = is_completion_confirmed(clean)
+                if not confirmed:
+                    completion_check_rounds += 1
+                    logger.info(
+                        "Completion check round {} for {}; task not confirmed complete, continuing",
+                        completion_check_rounds,
+                        spec.session_key or "default",
+                    )
+                    messages.append(build_assistant_message(
+                        clean,
+                        reasoning_content=response.reasoning_content,
+                        thinking_blocks=response.thinking_blocks,
+                    ))
+                    messages.append(build_completion_check_message())
+                    await hook.after_iteration(context)
+                    continue
+
+                if answer:
+                    clean = answer
 
             messages.append(build_assistant_message(
                 clean,
@@ -518,6 +545,91 @@ class AgentRunner:
                     updated = [dict(m) for m in messages]
                 updated[idx]["content"] = normalized
         return updated
+
+    async def _maybe_compact_context(
+        self,
+        spec: AgentRunSpec,
+        messages: list[dict[str, Any]],
+        iteration: int,
+    ) -> list[dict[str, Any]]:
+        if not spec.context_compact_threshold_tokens:
+            return messages
+        if iteration == 0:
+            return messages
+
+        estimate, _ = estimate_prompt_tokens_chain(
+            self.provider,
+            spec.model,
+            messages,
+            spec.tools.get_definitions(),
+        )
+        if estimate < spec.context_compact_threshold_tokens:
+            return messages
+
+        system_messages = [msg for msg in messages if msg.get("role") == "system"]
+        non_system = [msg for msg in messages if msg.get("role") != "system"]
+        if len(non_system) <= 4:
+            return messages
+
+        user_messages = [msg for msg in non_system if msg.get("role") == "user"]
+        assistant_messages = [msg for msg in non_system if msg.get("role") == "assistant" and not msg.get("tool_calls")]
+        tool_messages = [msg for msg in non_system if msg.get("role") == "tool"]
+
+        first_user = user_messages[0] if user_messages else None
+        recent_count = min(6, len(non_system))
+        recent_messages = non_system[-recent_count:]
+
+        compactable = non_system[:-recent_count]
+        if first_user and first_user not in recent_messages:
+            compactable = [first_user] + [m for m in compactable if m != first_user]
+
+        if not compactable:
+            return messages
+
+        logger.info(
+            "Context compaction triggered at iteration {} ({} tokens > {} threshold); compacting {} messages",
+            iteration, estimate, spec.context_compact_threshold_tokens, len(compactable),
+        )
+
+        summary_text = "\n\n".join(
+            f"[{m.get('role', '?').upper()}] {m.get('content', '')}"
+            for m in compactable
+            if m.get('content')
+        )
+
+        try:
+            response = await self.provider.chat_with_retry(
+                model=spec.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a context compaction assistant. "
+                            "Summarize the following conversation history into a concise summary. "
+                            "Include: the original task, key decisions made, tool results obtained, "
+                            "and current progress state. Omit redundant details and verbose outputs. "
+                            "Keep all important facts, code snippets, and file paths. "
+                            "Format as a structured summary with clear sections."
+                        ),
+                    },
+                    {"role": "user", "content": summary_text[:30000]},
+                ],
+                tools=None,
+                tool_choice=None,
+                max_tokens=2048,
+                temperature=0,
+            )
+            summary = response.content or "[compaction failed - original context preserved]"
+        except Exception as exc:
+            logger.warning("Context compaction LLM call failed: {}", exc)
+            summary = "[compaction skipped due to error]"
+
+        compacted_message = {
+            "role": "system",
+            "content": f"[COMPACTED CONTEXT - {len(compactable)} messages summarized]\n\n{summary}",
+        }
+
+        return system_messages + [compacted_message] + recent_messages
 
     def _snip_history(
         self,
