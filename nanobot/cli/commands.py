@@ -698,9 +698,17 @@ def gateway(
             return response
 
         if job.payload.deliver and job.payload.to and response:
+            # Only suppress if the response is genuinely empty or signals no
+            # useful output — the user already opted in via deliver=True, so
+            # don't let the evaluator silently discard routine completions.
             should_notify = await evaluate_response(
                 response, job.payload.message, provider, agent.model,
             )
+            if not should_notify:
+                logger.info(
+                    "Cron: job '{}' response suppressed by evaluator (deliver=True but response deemed routine)",
+                    job.name,
+                )
             if should_notify:
                 from nanobot.bus.events import OutboundMessage
                 await bus.publish_outbound(OutboundMessage(

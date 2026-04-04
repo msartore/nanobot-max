@@ -90,6 +90,7 @@ class CronService:
         if self.store_path.exists():
             try:
                 data = json.loads(self.store_path.read_text(encoding="utf-8"))
+                self._last_mtime = self.store_path.stat().st_mtime  # prevent spurious "modified externally" on next call
                 jobs = []
                 for j in data.get("jobs", []):
                     jobs.append(CronJob(
@@ -320,14 +321,23 @@ class CronService:
                 job.state.next_run_at_ms = None
         else:
             if job.state.last_status == "error" and job.state.retry_count:
-                backoff_s = min(2 ** job.state.retry_count * 60, 3600)
+                # Reduced minimum: 30s, 60s, 120s, 240s, 480s, 600s cap (was 120s..3600s)
+                backoff_s = min(2 ** job.state.retry_count * 30, 600)
                 job.state.next_run_at_ms = _now_ms() + backoff_s * 1000
                 logger.info(
                     "Cron: job '{}' retrying in {}s (attempt {})",
                     job.name, backoff_s, job.state.retry_count,
                 )
             else:
-                job.state.next_run_at_ms = _compute_next_run(job.schedule, scheduled_time)
+                # "every" jobs must advance from NOW, not from scheduled_time.
+                # Using scheduled_time when execution was slow puts next_run in
+                # the past, causing an immediate re-run loop on the next tick.
+                # "cron" and "at" jobs advance from scheduled_time to stay
+                # aligned with their expression.
+                if job.schedule.kind == "every":
+                    job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
+                else:
+                    job.state.next_run_at_ms = _compute_next_run(job.schedule, scheduled_time)
 
     # ========== Public API ==========
 
