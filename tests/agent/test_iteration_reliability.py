@@ -265,7 +265,11 @@ async def test_compaction_not_triggered_below_threshold(tmp_path):
 
 @pytest.mark.asyncio
 async def test_compaction_triggered_above_threshold(tmp_path):
-    """When above threshold, compaction LLM call is made."""
+    """Context compaction is now handled by the memory layer, not the runner.
+    
+    The runner only does snipping for context window safety.
+    Summary compaction happens in AgentLoop._update_context_summary after each turn.
+    """
     runner = _make_runner()
     compaction_called = {"n": 0}
     iteration_count = {"n": 0}
@@ -312,7 +316,8 @@ async def test_compaction_triggered_above_threshold(tmp_path):
             context_compact_threshold_tokens=100,
         ))
 
-    assert compaction_called["n"] >= 1
+    # Compaction is no longer in the runner; it's handled by AgentLoop._update_context_summary
+    assert compaction_called["n"] == 0
 
 
 @pytest.mark.asyncio

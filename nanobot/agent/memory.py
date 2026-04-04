@@ -188,6 +188,77 @@ class MemoryStore:
             suffix += 1
         return candidate
 
+    # -- context summary (global workspace-level conversation summary) -------
+
+    _CONTEXT_SUMMARY_FILE = "memory/CONTEXT_SUMMARY.md"
+    _CONTEXT_SUMMARY_COMPACT_TOKENS = 80_000
+
+    def save_context_summary(self, content: str) -> None:
+        """Save a global context summary to memory/CONTEXT_SUMMARY.md."""
+        path = self.workspace / self._CONTEXT_SUMMARY_FILE
+        ensure_dir(path.parent)
+        path.write_text(content, encoding="utf-8")
+
+    def load_context_summary(self) -> str:
+        """Load the global context summary if it exists."""
+        path = self.workspace / self._CONTEXT_SUMMARY_FILE
+        return self.read_file(path)
+
+    async def update_context_summary(
+        self,
+        provider: LLMProvider,
+        model: str,
+        turn_summary: str,
+    ) -> None:
+        """Append a turn summary to the context summary, compacting if over 80k tokens.
+
+        If no summary exists yet, creates one from the turn summary.
+        If the summary exceeds 80k tokens, asks the LLM to compress it.
+        """
+        existing = self.load_context_summary()
+        if existing:
+            new_summary = f"{existing}\n\n{turn_summary}"
+        else:
+            new_summary = turn_summary
+
+        # Check if compaction is needed
+        try:
+            token_count = estimate_message_tokens({"role": "user", "content": new_summary})
+        except Exception:
+            token_count = len(new_summary) // 4  # rough fallback
+
+        if token_count > self._CONTEXT_SUMMARY_COMPACT_TOKENS:
+            try:
+                response = await provider.chat_with_retry(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Compress this conversation summary while preserving all important facts, "
+                                "decisions, file paths, code snippets, and context. Be concise but thorough. "
+                                "Maintain chronological order."
+                            ),
+                        },
+                        {"role": "user", "content": new_summary},
+                    ],
+                    tools=None,
+                    tool_choice=None,
+                    max_tokens=2048,
+                    temperature=0,
+                )
+                compressed = response.content
+                if compressed and compressed != "[compaction failed]":
+                    new_summary = compressed
+                    logger.info("Context summary compacted: {} -> ~{} tokens", token_count, len(compressed) // 4)
+                else:
+                    logger.warning("Context summary compaction failed, keeping uncompressed version")
+            except Exception as exc:
+                logger.warning("Context summary compaction LLM call failed: {}", exc)
+
+        self.save_context_summary(new_summary)
+        logger.info("Context summary updated ({} chars)", len(new_summary))
+
     # -- MEMORY.md (long-term facts) -----------------------------------------
 
     def read_memory(self) -> str:

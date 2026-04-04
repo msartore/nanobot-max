@@ -556,6 +556,7 @@ class AgentLoop:
             self._clear_runtime_checkpoint(session)
             self.sessions.save(session)
             self._schedule_background(self.consolidator.maybe_consolidate_by_tokens(session))
+            self._schedule_background(self._update_context_summary(session, all_msgs, history))
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
 
@@ -613,6 +614,9 @@ class AgentLoop:
         self._clear_runtime_checkpoint(session)
         self.sessions.save(session)
         self._schedule_background(self.consolidator.maybe_consolidate_by_tokens(session))
+
+        # Update context summary with turn summary
+        self._schedule_background(self._update_context_summary(session, all_msgs, history))
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
@@ -706,6 +710,45 @@ class AgentLoop:
         """Persist the latest in-flight turn state into session metadata."""
         session.metadata[self._RUNTIME_CHECKPOINT_KEY] = payload
         self.sessions.save(session)
+
+    async def _update_context_summary(
+        self,
+        session: Session,
+        all_msgs: list[dict[str, Any]],
+        history: list[dict[str, Any]],
+    ) -> None:
+        """Update the workspace context summary after each turn."""
+        if not self.workspace:
+            return
+
+        # Extract the turn's user message and assistant response
+        new_msgs = all_msgs[len(history):]
+        if not new_msgs:
+            return
+
+        user_msg = ""
+        assistant_msg = ""
+        for m in new_msgs:
+            role = m.get("role")
+            content = m.get("content", "")
+            if role == "user" and not user_msg:
+                user_msg = content[:500] if isinstance(content, str) else str(content)[:500]
+            elif role == "assistant":
+                assistant_msg = content[:1000] if isinstance(content, str) else str(content)[:1000]
+
+        if not user_msg and not assistant_msg:
+            return
+
+        turn_summary = f"[{session.key}] User: {user_msg}\nAssistant: {assistant_msg}"
+
+        try:
+            await self.context.memory.update_context_summary(
+                self.provider,
+                self.model,
+                turn_summary,
+            )
+        except Exception as exc:
+            logger.warning("Failed to update context summary: {}", exc)
 
     def _clear_runtime_checkpoint(self, session: Session) -> None:
         if self._RUNTIME_CHECKPOINT_KEY in session.metadata:

@@ -38,6 +38,10 @@ class ContextBuilder:
         if memory:
             parts.append(f"# Memory\n\n{memory}")
 
+        context_summary = self.memory.load_context_summary()
+        if context_summary:
+            parts.append(f"# Context Summary\n\n{context_summary}")
+
         always_skills = self.skills.get_always_skills()
         if always_skills:
             always_content = self.skills.load_skills_for_context(always_skills)
