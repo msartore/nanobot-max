@@ -212,14 +212,17 @@ class AgentRunner:
                 error_detail = clean or spec.error_message or _DEFAULT_ERROR_MESSAGE
                 if self._is_input_validation_error(error_detail):
                     before = len(messages)
+                    logger.warning(
+                        "LLM returned input validation error on turn {} for {}: {}",
+                        iteration,
+                        spec.session_key or "default",
+                        error_detail,
+                    )
                     snipped = self._snip_history(spec, messages)
                     if len(snipped) < before:
                         messages = snipped
                         logger.warning(
-                            "LLM returned input validation error on turn {} for {}: {}; snipped {} -> {} messages and retrying",
-                            iteration,
-                            spec.session_key or "default",
-                            error_detail[:200],
+                            "Snipped {} -> {} messages and retrying",
                             before,
                             len(messages),
                         )
@@ -230,19 +233,16 @@ class AgentRunner:
                         keep = non_system[-8:] if len(non_system) > 8 else non_system
                         messages = system_msgs + keep
                         logger.warning(
-                            "LLM returned input validation error on turn {} for {}: {}; hard-truncated {} -> {} messages and retrying",
-                            iteration,
-                            spec.session_key or "default",
-                            error_detail[:200],
+                            "Hard-truncated {} -> {} messages and retrying",
                             before,
                             len(messages),
                         )
                 else:
                     logger.warning(
-                        "LLM returned error on turn {} for {}: {}; retrying with error context",
+                        "LLM returned error on turn {} for {}: {}",
                         iteration,
                         spec.session_key or "default",
-                        error_detail[:200],
+                        error_detail,
                     )
                     messages.append(build_assistant_message(
                         "(LLM error occurred, retrying...)",

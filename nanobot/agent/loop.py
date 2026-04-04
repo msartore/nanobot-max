@@ -405,7 +405,7 @@ class AgentLoop:
         if result.stop_reason == "max_iterations":
             logger.warning("Max iterations ({}) reached", self.max_iterations)
         elif result.stop_reason == "error":
-            logger.error("LLM returned error: {}", (result.final_content or "")[:200])
+            logger.error("LLM returned error: {}", result.final_content or "")
         return result.final_content, result.tools_used, result.messages
 
     async def run(self) -> None:
@@ -617,7 +617,7 @@ class AgentLoop:
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
 
-        preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
+        preview = final_content[:1000] + "..." if len(final_content) > 1000 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         meta = dict(msg.metadata or {})
