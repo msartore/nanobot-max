@@ -346,3 +346,100 @@ async def test_compaction_disabled_when_none(tmp_path):
     ))
 
     assert compaction_called["n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Input validation error recovery (400 / context too large)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_input_validation_error_snips_context():
+    """When LLM returns a 400 input validation error, the runner snips history
+    rather than appending more messages, so context shrinks before retrying."""
+    runner = _make_runner()
+    call_count = {"n": 0}
+
+    # Build a conversation with many messages so snipping has something to do
+    initial_messages = [{"role": "user", "content": "Start"}]
+    for i in range(20):
+        initial_messages.append({"role": "assistant", "content": f"Step {i}"})
+        initial_messages.append({"role": "user", "content": f"Result {i}"})
+
+    message_counts = []
+
+    async def chat_with_retry(**kwargs):
+        call_count["n"] += 1
+        message_counts.append(len(kwargs.get("messages", [])))
+        if call_count["n"] == 1:
+            return LLMResponse(
+                content='Error: {"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"Input validation error"}}}',
+                finish_reason="error",
+                tool_calls=[],
+                usage={},
+            )
+        return LLMResponse(content="DONE: Recovered successfully", tool_calls=[], usage={})
+
+    runner.provider.chat_with_retry = chat_with_retry
+
+    result = await runner.run(AgentRunSpec(
+        initial_messages=initial_messages,
+        tools=_make_tools(),
+        model="test-model",
+        max_iterations=5,
+        max_tool_result_chars=16000,
+        context_window_tokens=8000,
+        max_completion_checks=0,
+    ))
+
+    assert result.stop_reason == "completed"
+    assert "Recovered successfully" in (result.final_content or "")
+    # Second call must have fewer messages than the first (snipping or hard-truncation worked)
+    assert message_counts[1] < message_counts[0], (
+        f"Expected context to shrink after input validation error, "
+        f"but got {message_counts[0]} -> {message_counts[1]} messages"
+    )
+
+
+@pytest.mark.asyncio
+async def test_input_validation_error_hard_truncates_without_context_window():
+    """When context_window_tokens is not set, input validation error triggers
+    hard truncation to the last 8 non-system messages."""
+    runner = _make_runner()
+    call_count = {"n": 0}
+
+    # Build a long conversation
+    initial_messages = [{"role": "user", "content": "Start"}]
+    for i in range(20):
+        initial_messages.append({"role": "assistant", "content": f"Step {i}"})
+        initial_messages.append({"role": "user", "content": f"Result {i}"})
+
+    message_counts = []
+
+    async def chat_with_retry(**kwargs):
+        call_count["n"] += 1
+        message_counts.append(len(kwargs.get("messages", [])))
+        if call_count["n"] == 1:
+            return LLMResponse(
+                content='Error: {"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"Input validation error"}}}',
+                finish_reason="error",
+                tool_calls=[],
+                usage={},
+            )
+        return LLMResponse(content="DONE: Recovered", tool_calls=[], usage={})
+
+    runner.provider.chat_with_retry = chat_with_retry
+
+    result = await runner.run(AgentRunSpec(
+        initial_messages=initial_messages,
+        tools=_make_tools(),
+        model="test-model",
+        max_iterations=5,
+        max_tool_result_chars=16000,
+        # No context_window_tokens — forces hard truncation
+        max_completion_checks=0,
+    ))
+
+    assert result.stop_reason == "completed"
+    assert message_counts[1] <= 8, (
+        f"Expected hard truncation to <=8 non-system messages, got {message_counts[1]}"
+    )

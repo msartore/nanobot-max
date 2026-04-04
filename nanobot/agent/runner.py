@@ -210,21 +210,49 @@ class AgentRunner:
 
             if response.finish_reason == "error":
                 error_detail = clean or spec.error_message or _DEFAULT_ERROR_MESSAGE
-                logger.warning(
-                    "LLM returned error on turn {} for {}: {}; retrying with error context",
-                    iteration,
-                    spec.session_key or "default",
-                    error_detail[:200],
-                )
-                messages.append(build_assistant_message(
-                    "(LLM error occurred, retrying...)",
-                    reasoning_content=response.reasoning_content,
-                    thinking_blocks=response.thinking_blocks,
-                ))
-                messages.append({
-                    "role": "user",
-                    "content": f"The previous request failed with: {error_detail[:500]}. Please continue with your task using the conversation above."
-                })
+                if self._is_input_validation_error(error_detail):
+                    before = len(messages)
+                    snipped = self._snip_history(spec, messages)
+                    if len(snipped) < before:
+                        messages = snipped
+                        logger.warning(
+                            "LLM returned input validation error on turn {} for {}: {}; snipped {} -> {} messages and retrying",
+                            iteration,
+                            spec.session_key or "default",
+                            error_detail[:200],
+                            before,
+                            len(messages),
+                        )
+                    else:
+                        # No context window configured or snip had no effect — hard-truncate to recent messages
+                        system_msgs = [m for m in messages if m.get("role") == "system"]
+                        non_system = [m for m in messages if m.get("role") != "system"]
+                        keep = non_system[-8:] if len(non_system) > 8 else non_system
+                        messages = system_msgs + keep
+                        logger.warning(
+                            "LLM returned input validation error on turn {} for {}: {}; hard-truncated {} -> {} messages and retrying",
+                            iteration,
+                            spec.session_key or "default",
+                            error_detail[:200],
+                            before,
+                            len(messages),
+                        )
+                else:
+                    logger.warning(
+                        "LLM returned error on turn {} for {}: {}; retrying with error context",
+                        iteration,
+                        spec.session_key or "default",
+                        error_detail[:200],
+                    )
+                    messages.append(build_assistant_message(
+                        "(LLM error occurred, retrying...)",
+                        reasoning_content=response.reasoning_content,
+                        thinking_blocks=response.thinking_blocks,
+                    ))
+                    messages.append({
+                        "role": "user",
+                        "content": f"The previous request failed with: {error_detail[:500]}. Please continue with your task using the conversation above."
+                    })
                 await hook.after_iteration(context)
                 continue
             if is_blank_text(clean):
@@ -357,6 +385,21 @@ class AgentRunner:
         retry_messages.append(build_finalization_retry_message())
         kwargs = self._build_request_kwargs(spec, retry_messages, tools=None)
         return await self.provider.chat_with_retry(**kwargs)
+
+    _INPUT_VALIDATION_ERROR_MARKERS = (
+        "input validation error",
+        "\"code\":400",
+        "'code': 400",
+        "400",
+    )
+
+    @classmethod
+    def _is_input_validation_error(cls, content: str | None) -> bool:
+        """Return True if the error looks like a provider 400 / input validation error."""
+        err = (content or "").lower()
+        return "input validation" in err or (
+            "400" in err and ("provider returned error" in err or "invalid" in err)
+        )
 
     @staticmethod
     def _usage_dict(usage: dict[str, Any] | None) -> dict[str, int]:
