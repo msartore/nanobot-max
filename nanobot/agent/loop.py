@@ -37,7 +37,7 @@ from nanobot.utils.helpers import image_placeholder_text, truncate_text
 from nanobot.utils.runtime import EMPTY_FINAL_RESPONSE_MESSAGE
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, WebToolsConfig
+    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, WebToolsConfig, XSearchConfig
     from nanobot.cron.service import CronService
 
 
@@ -174,6 +174,7 @@ class AgentLoop:
         provider_retry_mode: str = "standard",
         web_config: WebToolsConfig | None = None,
         exec_config: ExecToolConfig | None = None,
+        xsearch_config: "XSearchConfig | None" = None,
         cron_service: CronService | None = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
@@ -219,6 +220,7 @@ class AgentLoop:
         )
         self.web_config = web_config or WebToolsConfig()
         self.exec_config = exec_config or ExecToolConfig()
+        self.xsearch_config = xsearch_config
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self._start_time = time.time()
@@ -291,6 +293,9 @@ class AgentLoop:
         if self.web_config.enable:
             self.tools.register(WebSearchTool(config=self.web_config.search, proxy=self.web_config.proxy))
             self.tools.register(WebFetchTool(proxy=self.web_config.proxy))
+        if self.xsearch_config and self.xsearch_config.enable:
+            from nanobot.agent.tools.xsearch import XSearchTool
+            self.tools.register(XSearchTool(self.xsearch_config))
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound, workspace=self.workspace))
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
