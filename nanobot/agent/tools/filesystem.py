@@ -120,6 +120,9 @@ class ReadFileTool(_FsTool):
             except UnicodeDecodeError:
                 return f"Error: Cannot read binary file {path} (MIME: {mime or 'unknown'}). Only UTF-8 text and images are supported."
 
+            if fp.name == "SKILL.md" and "{baseDir}" in text_content:
+                text_content = text_content.replace("{baseDir}", str(fp.parent))
+
             all_lines = text_content.splitlines()
             total = len(all_lines)
 

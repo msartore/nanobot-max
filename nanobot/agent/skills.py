@@ -69,13 +69,15 @@ class SkillsLoader:
         # Check workspace first
         workspace_skill = self.workspace_skills / name / "SKILL.md"
         if workspace_skill.exists():
-            return workspace_skill.read_text(encoding="utf-8")
+            content = workspace_skill.read_text(encoding="utf-8")
+            return content.replace("{baseDir}", str(workspace_skill.parent))
 
         # Check built-in
         if self.builtin_skills:
             builtin_skill = self.builtin_skills / name / "SKILL.md"
             if builtin_skill.exists():
-                return builtin_skill.read_text(encoding="utf-8")
+                content = builtin_skill.read_text(encoding="utf-8")
+                return content.replace("{baseDir}", str(builtin_skill.parent))
 
         return None
 
@@ -119,6 +121,7 @@ class SkillsLoader:
         for s in all_skills:
             name = escape_xml(s["name"])
             path = s["path"]
+            base_dir = escape_xml(str(Path(path).parent))
             desc = escape_xml(self._get_skill_description(s["name"]))
             skill_meta = self._get_skill_meta(s["name"])
             available = self._check_requirements(skill_meta)
@@ -127,6 +130,7 @@ class SkillsLoader:
             lines.append(f"    <name>{name}</name>")
             lines.append(f"    <description>{desc}</description>")
             lines.append(f"    <location>{path}</location>")
+            lines.append(f"    <baseDir>{base_dir}</baseDir>")
 
             # Show missing requirements for unavailable skills
             if not available:
