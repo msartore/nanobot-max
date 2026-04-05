@@ -63,7 +63,9 @@ class XSearchTool(Tool):
     def description(self) -> str:
         return (
             "Search X (Twitter) posts in real time using xAI Grok. "
-            "Use for finding tweets, market commentary, social media sentiment, or news on X."
+            "PREFER this over web_search whenever the query involves X/Twitter content, "
+            "specific X handles (@user), tweets, market commentary, social media sentiment, "
+            "or breaking news that is likely discussed on X."
         )
 
     @property
