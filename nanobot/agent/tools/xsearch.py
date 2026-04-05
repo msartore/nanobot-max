@@ -65,7 +65,9 @@ class XSearchTool(Tool):
             "Search X (Twitter) posts in real time using xAI Grok. "
             "PREFER this over web_search whenever the query involves X/Twitter content, "
             "specific X handles (@user), tweets, market commentary, social media sentiment, "
-            "or breaking news that is likely discussed on X."
+            "or breaking news likely discussed on X. "
+            "Always pass a descriptive query (e.g. 'latest posts', 'recent market commentary'); "
+            "use handles to restrict results to specific accounts."
         )
 
     @property
@@ -145,14 +147,31 @@ class XSearchTool(Tool):
     ) -> str:
         api_key = self._api_key()
         if not api_key:
+            logger.warning("x_search: XAI_API_KEY not configured")
             return "Error: XAI_API_KEY is not configured. Set it in config (tools.xsearch.apiKey) or as an environment variable."
 
         if handles and exclude_handles:
+            logger.warning("x_search: handles and exclude_handles both set — rejecting")
             return "Error: handles and exclude_handles cannot be used together."
+
+        # Empty query with handles: ask for latest posts from those accounts
+        if not query and handles:
+            original_query = query
+            query = f"Show the latest posts from {', '.join('@' + h.lstrip('@') for h in handles)}"
+            logger.debug("x_search: empty query with handles={} — synthesized query: '{}'", handles, query)
+
+        if not query:
+            logger.warning("x_search: query is empty and no handles provided")
+            return "Error: query is required."
 
         tool_config = self._build_tool_config(
             handles, exclude_handles, from_date, to_date, images, video
         )
+        logger.info(
+            "x_search: query='{}' handles={} exclude={} dates=[{}, {}] images={} video={} model={}",
+            query, handles, exclude_handles, from_date, to_date, images, video, self._config.model,
+        )
+
         body = {
             "model": self._config.model,
             "input": [{"role": "user", "content": query}],
@@ -172,14 +191,24 @@ class XSearchTool(Tool):
                         "User-Agent": "nanobot/x-search",
                     },
                 )
+                logger.debug("x_search: HTTP {} from xAI API ({} bytes)", r.status_code, len(r.content))
                 if r.status_code != 200:
-                    logger.warning("xAI API error {}: {}", r.status_code, r.text[:200])
+                    logger.warning("x_search: xAI API error {}: {}", r.status_code, r.text[:200])
                     return f"Error: xAI API returned {r.status_code}: {r.text[:200]}"
                 data = r.json()
         except ImportError:
             return "Error: httpx is required for x_search. Install it with: pip install httpx"
         except Exception as exc:
-            logger.warning("x_search request failed: {}", exc)
+            logger.warning("x_search: request failed: {}", exc)
             return f"Error: x_search request failed: {exc}"
+
+        status = data.get("status", "unknown")
+        outputs = data.get("output") or []
+        n_citations = sum(
+            len(c.get("annotations") or [])
+            for o in outputs if isinstance(o, dict) and o.get("type") == "message"
+            for c in (o.get("content") or []) if isinstance(c, dict)
+        )
+        logger.info("x_search: done — status='{}' output_blocks={} citations={}", status, len(outputs), n_citations)
 
         return self._format_response(data, query)

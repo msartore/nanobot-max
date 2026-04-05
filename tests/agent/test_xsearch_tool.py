@@ -80,6 +80,14 @@ def test_api_key_empty_when_neither_set(monkeypatch):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
+async def test_execute_returns_error_when_empty_query_no_handles():
+    tool = _make_tool()
+    result = await tool.execute(query="")
+    assert "Error" in result
+    assert "query" in result.lower()
+
+
+@pytest.mark.asyncio
 async def test_execute_returns_error_when_no_api_key(monkeypatch):
     monkeypatch.delenv("XAI_API_KEY", raising=False)
     tool = _make_tool(api_key="")
@@ -114,6 +122,30 @@ def _make_api_response(text: str = "Found some posts.", citations: list | None =
         "status": "completed",
         "output": [{"type": "message", "content": content}],
     }
+
+
+@pytest.mark.asyncio
+async def test_execute_constructs_fallback_query_for_empty_query_with_handles():
+    """When query is empty but handles are provided, a descriptive query is synthesized."""
+    tool = _make_tool()
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = _make_api_response("Some tweets.")
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(return_value=mock_response)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        result = await tool.execute(query="", handles=["disclosetv"])
+
+    body = mock_client.post.call_args[1]["json"]
+    sent_query = body["input"][0]["content"]
+    assert "@disclosetv" in sent_query
+    assert sent_query  # non-empty
+    assert "Some tweets." in result
 
 
 @pytest.mark.asyncio
