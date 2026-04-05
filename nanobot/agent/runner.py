@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -196,6 +197,44 @@ class AgentRunner:
                 continue
 
             clean = hook.finalize_content(context, response.content)
+
+            # Detect XML function-call syntax (<function=name>...</function>) in text responses.
+            # The model sometimes outputs this format when it wants to invoke a skill but skips
+            # the required exec flow. Intercept it and redirect with a correction.
+            xml_skill_name = self._detect_xml_skill_call(clean)
+            if xml_skill_name is not None and response.finish_reason != "error":
+                snippet = (clean or "")[:200].replace("\n", " ")
+                logger.warning(
+                    "XML skill call detected on turn {}/{} for {} | skill='{}' | snippet='{}'",
+                    iteration,
+                    spec.max_iterations,
+                    spec.session_key or "default",
+                    xml_skill_name,
+                    snippet,
+                )
+                if hook.wants_streaming() and _streaming_this_iter:
+                    await hook.on_stream_end(context, resuming=True)
+                correction = (
+                    f"`<function={xml_skill_name}>` syntax is not supported. "
+                    f"Skills must be invoked via the `exec` tool. "
+                    f"Use `read_file` on the skill's SKILL.md (see `<location>` in the skills listing), "
+                    f"then call `exec` with the shell command shown there. "
+                    f"The `<baseDir>` value in the skills listing gives you the path to substitute for {{baseDir}}."
+                )
+                messages.append(build_assistant_message(
+                    clean or "",
+                    reasoning_content=response.reasoning_content,
+                    thinking_blocks=response.thinking_blocks,
+                ))
+                messages.append({"role": "user", "content": correction})
+                logger.debug(
+                    "XML skill redirect correction appended for {} | total messages={}",
+                    spec.session_key or "default",
+                    len(messages),
+                )
+                await hook.after_iteration(context)
+                continue
+
             if response.finish_reason != "error" and is_blank_text(clean):
                 logger.warning(
                     "Empty final response on turn {} for {}; retrying with explicit finalization prompt",
@@ -432,6 +471,16 @@ class AgentRunner:
                 await hook.on_stream(context, delta)
             return await self.provider.chat_stream_with_retry(**kwargs, on_content_delta=_stream)
         return await self.provider.chat_with_retry(**kwargs)
+
+    _XML_SKILL_CALL_RE = re.compile(r"<function=([A-Za-z0-9_:.-]+)\s*>", re.IGNORECASE)
+
+    @classmethod
+    def _detect_xml_skill_call(cls, text: str | None) -> str | None:
+        """Return the skill name if text contains a bare <function=name> XML invocation, else None."""
+        if not text or "<function=" not in text:
+            return None
+        m = cls._XML_SKILL_CALL_RE.search(text)
+        return m.group(1) if m else None
 
     _INPUT_VALIDATION_ERROR_MARKERS = (
         "input validation error",

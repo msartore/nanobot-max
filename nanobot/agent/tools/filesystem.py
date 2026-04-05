@@ -121,7 +121,7 @@ class ReadFileTool(_FsTool):
                 return f"Error: Cannot read binary file {path} (MIME: {mime or 'unknown'}). Only UTF-8 text and images are supported."
 
             if fp.name == "SKILL.md" and "{baseDir}" in text_content:
-                text_content = text_content.replace("{baseDir}", str(fp.parent))
+                text_content = text_content.replace("{baseDir}", fp.parent.as_posix())
 
             all_lines = text_content.splitlines()
             total = len(all_lines)

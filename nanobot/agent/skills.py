@@ -70,14 +70,14 @@ class SkillsLoader:
         workspace_skill = self.workspace_skills / name / "SKILL.md"
         if workspace_skill.exists():
             content = workspace_skill.read_text(encoding="utf-8")
-            return content.replace("{baseDir}", str(workspace_skill.parent))
+            return content.replace("{baseDir}", workspace_skill.parent.as_posix())
 
         # Check built-in
         if self.builtin_skills:
             builtin_skill = self.builtin_skills / name / "SKILL.md"
             if builtin_skill.exists():
                 content = builtin_skill.read_text(encoding="utf-8")
-                return content.replace("{baseDir}", str(builtin_skill.parent))
+                return content.replace("{baseDir}", builtin_skill.parent.as_posix())
 
         return None
 
@@ -120,8 +120,8 @@ class SkillsLoader:
         lines = ["<skills>"]
         for s in all_skills:
             name = escape_xml(s["name"])
-            path = s["path"]
-            base_dir = escape_xml(str(Path(path).parent))
+            path = Path(s["path"]).as_posix()
+            base_dir = escape_xml(Path(s["path"]).parent.as_posix())
             desc = escape_xml(self._get_skill_description(s["name"]))
             skill_meta = self._get_skill_meta(s["name"])
             available = self._check_requirements(skill_meta)
@@ -129,7 +129,7 @@ class SkillsLoader:
             lines.append(f"  <skill available=\"{str(available).lower()}\">")
             lines.append(f"    <name>{name}</name>")
             lines.append(f"    <description>{desc}</description>")
-            lines.append(f"    <location>{path}</location>")
+            lines.append(f"    <location>{escape_xml(path)}</location>")
             lines.append(f"    <baseDir>{base_dir}</baseDir>")
 
             # Show missing requirements for unavailable skills
@@ -221,12 +221,44 @@ class SkillsLoader:
         if content.startswith("---"):
             match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
             if match:
-                # Simple YAML parsing
-                metadata = {}
-                for line in match.group(1).split("\n"):
-                    if ":" in line:
+                frontmatter = match.group(1)
+                # Simple line-by-line YAML parsing for scalar values
+                metadata: dict = {}
+                for line in frontmatter.split("\n"):
+                    if ":" in line and not line.startswith(" ") and not line.startswith("\t"):
                         key, value = line.split(":", 1)
                         metadata[key.strip()] = value.strip().strip('"\'')
+                # The metadata field may have a multi-line JSON value that the
+                # simple parser missed (value captured as empty string).
+                # Re-parse it by extracting the raw JSON block from the frontmatter.
+                if not metadata.get("metadata"):
+                    json_block = self._extract_multiline_json(frontmatter, "metadata")
+                    if json_block:
+                        metadata["metadata"] = json_block
                 return metadata
 
         return None
+
+    @staticmethod
+    def _extract_multiline_json(frontmatter: str, key: str) -> str:
+        """Extract a multi-line JSON value for a given top-level YAML key."""
+        # Find the key line (unindented)
+        key_pattern = re.compile(r"^" + re.escape(key) + r"\s*:\s*$", re.MULTILINE)
+        key_match = key_pattern.search(frontmatter)
+        if not key_match:
+            return ""
+        # Collect lines after the key until we leave the indented block
+        rest = frontmatter[key_match.end():]
+        block_lines = []
+        for line in rest.splitlines():
+            if line and not line[0].isspace():
+                break  # Back to a top-level key — stop
+            block_lines.append(line)
+        raw = "\n".join(block_lines).strip()
+        # Validate it parses as JSON (strip trailing commas which YAML allows)
+        cleaned = re.sub(r",\s*([\]}])", r"\1", raw)
+        try:
+            json.loads(cleaned)
+            return cleaned
+        except (json.JSONDecodeError, ValueError):
+            return ""

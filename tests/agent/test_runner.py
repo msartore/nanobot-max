@@ -935,3 +935,161 @@ async def test_runner_passes_cached_tokens_to_hook_context():
 
     assert len(captured_usage) == 1
     assert captured_usage[0]["cached_tokens"] == 150
+
+
+# ---------------------------------------------------------------------------
+# XML skill call detection and redirection
+# ---------------------------------------------------------------------------
+
+def test_detect_xml_skill_call_returns_name():
+    from nanobot.agent.runner import AgentRunner
+
+    assert AgentRunner._detect_xml_skill_call("<function=x-search>some params</function>") == "x-search"
+    assert AgentRunner._detect_xml_skill_call("<function=weather>") == "weather"
+    assert AgentRunner._detect_xml_skill_call("prefix\n<function=my-skill>\nstuff") == "my-skill"
+
+
+def test_detect_xml_skill_call_returns_none_for_normal_text():
+    from nanobot.agent.runner import AgentRunner
+
+    assert AgentRunner._detect_xml_skill_call(None) is None
+    assert AgentRunner._detect_xml_skill_call("") is None
+    assert AgentRunner._detect_xml_skill_call("Here are the results: ...") is None
+    assert AgentRunner._detect_xml_skill_call("Use exec to run the script") is None
+
+
+@pytest.mark.asyncio
+async def test_runner_redirects_xml_skill_call_and_continues():
+    """When the model outputs <function=skill> XML in text, the runner should
+    inject a correction message and continue the loop rather than treating
+    it as the final response."""
+    from nanobot.agent.runner import AgentRunSpec, AgentRunner
+
+    provider = MagicMock()
+    call_count = {"n": 0}
+    captured_messages: list[list] = []
+
+    async def chat_with_retry(*, messages, **kwargs):
+        call_count["n"] += 1
+        captured_messages.append(list(messages))
+        if call_count["n"] == 1:
+            # Model returns XML skill invocation instead of using exec
+            return LLMResponse(
+                content="Let me search for that.\n<function=x-search>\n<parameter=query>market news</parameter>\n</function>",
+                tool_calls=[],
+                usage={},
+            )
+        # After correction, model uses exec properly and returns a real answer
+        return LLMResponse(content="Here are the results.", tool_calls=[], usage={})
+
+    provider.chat_with_retry = chat_with_retry
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+
+    runner = AgentRunner(provider)
+    result = await runner.run(AgentRunSpec(
+        initial_messages=[{"role": "user", "content": "search for market news"}],
+        tools=tools,
+        model="test-model",
+        max_iterations=3,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+    ))
+
+    assert result.final_content == "Here are the results."
+    assert call_count["n"] == 2
+
+    # Second call should contain the assistant's bad attempt + correction message
+    second_call_messages = captured_messages[1]
+    roles = [m["role"] for m in second_call_messages]
+    assert "assistant" in roles
+    assert roles[-1] == "user"
+
+    correction = second_call_messages[-1]["content"]
+    assert "x-search" in correction
+    assert "exec" in correction
+    assert "SKILL.md" in correction
+    assert "baseDir" in correction
+
+
+@pytest.mark.asyncio
+async def test_runner_xml_skill_redirect_calls_stream_end_with_resuming_true():
+    """When streaming, on_stream_end must be called with resuming=True on XML
+    skill redirect so the channel knows the stream is continuing."""
+    from nanobot.agent.hook import AgentHook, AgentHookContext
+    from nanobot.agent.runner import AgentRunSpec, AgentRunner
+
+    provider = MagicMock()
+    call_count = {"n": 0}
+    endings: list[bool] = []
+
+    async def chat_stream_with_retry(*, on_content_delta, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            await on_content_delta("<function=x-search>q</function>")
+            return LLMResponse(
+                content="<function=x-search>q</function>",
+                tool_calls=[],
+                usage={},
+            )
+        await on_content_delta("done")
+        return LLMResponse(content="done", tool_calls=[], usage={})
+
+    provider.chat_stream_with_retry = chat_stream_with_retry
+    provider.chat_with_retry = AsyncMock()
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+
+    class StreamingHook(AgentHook):
+        def wants_streaming(self) -> bool:
+            return True
+
+        async def on_stream(self, context: AgentHookContext, delta: str) -> None:
+            pass
+
+        async def on_stream_end(self, context: AgentHookContext, *, resuming: bool) -> None:
+            endings.append(resuming)
+
+    runner = AgentRunner(provider)
+    result = await runner.run(AgentRunSpec(
+        initial_messages=[{"role": "user", "content": "search"}],
+        tools=tools,
+        model="test-model",
+        max_iterations=3,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        hook=StreamingHook(),
+    ))
+
+    assert result.final_content == "done"
+    # First stream end: resuming=True (redirect), second: resuming=False (final)
+    assert endings == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_runner_xml_skill_redirect_exhausts_max_iterations():
+    """If the model keeps outputting XML skill calls, the runner should
+    exhaust max_iterations and return the max_iterations fallback."""
+    from nanobot.agent.runner import AgentRunSpec, AgentRunner
+
+    provider = MagicMock()
+
+    async def chat_with_retry(**kwargs):
+        return LLMResponse(
+            content="<function=x-search>q</function>",
+            tool_calls=[],
+            usage={},
+        )
+
+    provider.chat_with_retry = chat_with_retry
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+
+    runner = AgentRunner(provider)
+    result = await runner.run(AgentRunSpec(
+        initial_messages=[{"role": "user", "content": "search"}],
+        tools=tools,
+        model="test-model",
+        max_iterations=3,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+    ))
+
+    assert result.stop_reason == "max_iterations"
