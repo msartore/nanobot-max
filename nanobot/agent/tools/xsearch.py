@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
 
 _API_URL = "https://api.x.ai/v1/responses"
 _TIMEOUT = 120.0
+_DEFAULT_LOOKBACK_DAYS = 7
 
 
 @tool_parameters(
@@ -67,7 +69,8 @@ class XSearchTool(Tool):
             "specific X handles (@user), tweets, market commentary, social media sentiment, "
             "or breaking news likely discussed on X. "
             "Always pass a descriptive query (e.g. 'latest posts', 'recent market commentary'); "
-            "use handles to restrict results to specific accounts."
+            "use handles to restrict results to specific accounts. "
+            "Results default to the last 7 days unless from_date/to_date are specified."
         )
 
     @property
@@ -163,6 +166,11 @@ class XSearchTool(Tool):
         if not query:
             logger.warning("x_search: query is empty and no handles provided")
             return "Error: query is required."
+
+        # Default from_date to last 7 days so results are recent
+        if not from_date:
+            from_date = (date.today() - timedelta(days=_DEFAULT_LOOKBACK_DAYS)).isoformat()
+            logger.debug("x_search: no from_date specified — defaulting to {}", from_date)
 
         tool_config = self._build_tool_config(
             handles, exclude_handles, from_date, to_date, images, video

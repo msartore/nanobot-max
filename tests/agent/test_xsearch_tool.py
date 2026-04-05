@@ -125,6 +125,52 @@ def _make_api_response(text: str = "Found some posts.", citations: list | None =
 
 
 @pytest.mark.asyncio
+async def test_execute_defaults_from_date_to_last_7_days():
+    """When no from_date is given, the API call should use today minus 7 days."""
+    from datetime import date, timedelta
+
+    tool = _make_tool()
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = _make_api_response("Recent tweets.")
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(return_value=mock_response)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        await tool.execute(query="latest news")
+
+    body = mock_client.post.call_args[1]["json"]
+    tool_cfg = body["tools"][0]
+    expected = (date.today() - timedelta(days=7)).isoformat()
+    assert tool_cfg.get("from_date") == expected
+
+
+@pytest.mark.asyncio
+async def test_execute_respects_explicit_from_date():
+    """An explicit from_date must not be overridden by the default."""
+    tool = _make_tool()
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = _make_api_response("Old tweets.")
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(return_value=mock_response)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        await tool.execute(query="news", from_date="2024-01-01")
+
+    body = mock_client.post.call_args[1]["json"]
+    assert body["tools"][0]["from_date"] == "2024-01-01"
+
+
+@pytest.mark.asyncio
 async def test_execute_constructs_fallback_query_for_empty_query_with_handles():
     """When query is empty but handles are provided, a descriptive query is synthesized."""
     tool = _make_tool()
