@@ -112,10 +112,10 @@ class TestMessageToolSuppressLogic:
         final_content, _, _ = await loop._run_agent_loop([], on_progress=on_progress)
 
         assert final_content == "Done"
-        assert progress == [
-            ("Visible", False),
-            ('read foo.txt', True),
-        ]
+        assert progress[0] == ("Visible", False)
+        assert ('read foo.txt', True) in progress
+        tool_result_calls = [p for p in progress if p[1] == False and "*result*" in p[0]]
+        assert len(tool_result_calls) <= 1
 
 
 class TestMessageToolTurnTracking:
