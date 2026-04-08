@@ -283,7 +283,7 @@ class WebFetchTool(Tool):
 
         result = await self._fetch_jina(url, max_chars)
         if result is None:
-            result = await self._fetch_readability(url, extractMode, max_chars)
+            result = await self._fetch_readability(url, extract_mode, max_chars)
         return result
 
     async def _fetch_jina(self, url: str, max_chars: int) -> str | None:

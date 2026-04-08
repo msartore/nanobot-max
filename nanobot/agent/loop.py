@@ -101,11 +101,18 @@ class _LoopHook(AgentHook):
         if self._on_progress and context.tool_results:
             results_formatted = []
             for tr in context.tool_results:
-                name = tr.get("name", "unknown")
-                content = tr.get("content", "")
+                if isinstance(tr, dict):
+                    name = tr.get("name", "unknown")
+                    content = tr.get("content", "")
+                else:
+                    name = "result"
+                    content = str(tr)
                 results_formatted.append(f"*{name}*\n{content[:500]}")
             results_text = "\n\n".join(results_formatted)
-            await self._on_progress(results_text, tool_results=True)
+            try:
+                await self._on_progress(results_text, tool_results=True)
+            except TypeError:
+                await self._on_progress(results_text)
 
     async def after_iteration(self, context: AgentHookContext) -> None:
         u = context.usage or {}
