@@ -33,7 +33,16 @@ from nanobot.utils.runtime import (
 )
 
 _DEFAULT_ERROR_MESSAGE = "Sorry, I encountered an error calling the AI model."
+_MAX_EMPTY_RETRIES = 2
+_MAX_LENGTH_RECOVERIES = 3
 _SNIP_SAFETY_BUFFER = 1024
+_MICROCOMPACT_KEEP_RECENT = 10
+_MICROCOMPACT_MIN_CHARS = 500
+_COMPACTABLE_TOOLS = frozenset({
+    "read_file", "exec", "grep", "glob",
+    "web_search", "web_fetch", "list_dir",
+})
+_BACKFILL_CONTENT = "[Tool result unavailable — call was interrupted or lost]"
 @dataclass(slots=True)
 class AgentRunSpec:
     """Configuration for a single agent execution."""
@@ -94,6 +103,8 @@ class AgentRunner:
         external_lookup_counts: dict[str, int] = {}
         completion_check_rounds = 0
         _suppress_streaming = False  # True when next call is a completion-check confirmation
+        empty_content_retries = 0
+        length_recovery_count = 0
 
         for iteration in range(spec.max_iterations):
             # Capture and reset the per-iteration streaming suppression flag.
@@ -101,6 +112,8 @@ class AgentRunner:
             _streaming_this_iter = not _suppress_streaming
             _suppress_streaming = False
             try:
+                messages = self._backfill_missing_tool_results(messages)
+                messages = self._microcompact(messages)
                 messages = self._apply_tool_result_budget(spec, messages)
                 messages_for_model = self._snip_history(spec, messages)
             except Exception as exc:
@@ -193,6 +206,8 @@ class AgentRunner:
                         "pending_tool_calls": [],
                     },
                 )
+                empty_content_retries = 0
+                length_recovery_count = 0
                 await hook.after_iteration(context)
                 continue
 
@@ -236,10 +251,24 @@ class AgentRunner:
                 continue
 
             if response.finish_reason != "error" and is_blank_text(clean):
+                empty_content_retries += 1
+                if empty_content_retries < _MAX_EMPTY_RETRIES:
+                    logger.warning(
+                        "Empty response on turn {} for {} ({}/{}); retrying",
+                        iteration,
+                        spec.session_key or "default",
+                        empty_content_retries,
+                        _MAX_EMPTY_RETRIES,
+                    )
+                    if hook.wants_streaming():
+                        await hook.on_stream_end(context, resuming=False)
+                    await hook.after_iteration(context)
+                    continue
                 logger.warning(
-                    "Empty final response on turn {} for {}; retrying with explicit finalization prompt",
+                    "Empty response on turn {} for {} after {} retries; attempting finalization",
                     iteration,
                     spec.session_key or "default",
+                    empty_content_retries,
                 )
                 if hook.wants_streaming() and _streaming_this_iter:
                     await hook.on_stream_end(context, resuming=False)
@@ -672,6 +701,73 @@ class AgentRunner:
         if isinstance(content, str) and len(content) > spec.max_tool_result_chars:
             return truncate_text(content, spec.max_tool_result_chars)
         return content
+
+    @staticmethod
+    def _backfill_missing_tool_results(
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Insert synthetic error results for orphaned tool_use blocks."""
+        declared: list[tuple[int, str, str]] = []  # (assistant_idx, call_id, name)
+        fulfilled: set[str] = set()
+        for idx, msg in enumerate(messages):
+            role = msg.get("role")
+            if role == "assistant":
+                for tc in msg.get("tool_calls") or []:
+                    if isinstance(tc, dict) and tc.get("id"):
+                        name = ""
+                        func = tc.get("function")
+                        if isinstance(func, dict):
+                            name = func.get("name", "")
+                        declared.append((idx, str(tc["id"]), name))
+            elif role == "tool":
+                tid = msg.get("tool_call_id")
+                if tid:
+                    fulfilled.add(str(tid))
+
+        missing = [(ai, cid, name) for ai, cid, name in declared if cid not in fulfilled]
+        if not missing:
+            return messages
+
+        updated = list(messages)
+        offset = 0
+        for assistant_idx, call_id, name in missing:
+            insert_at = assistant_idx + 1 + offset
+            while insert_at < len(updated) and updated[insert_at].get("role") == "tool":
+                insert_at += 1
+            updated.insert(insert_at, {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": name,
+                "content": _BACKFILL_CONTENT,
+            })
+            offset += 1
+        return updated
+
+    @staticmethod
+    def _microcompact(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Replace old compactable tool results with one-line summaries."""
+        compactable_indices: list[int] = []
+        for idx, msg in enumerate(messages):
+            if msg.get("role") == "tool" and msg.get("name") in _COMPACTABLE_TOOLS:
+                compactable_indices.append(idx)
+
+        if len(compactable_indices) <= _MICROCOMPACT_KEEP_RECENT:
+            return messages
+
+        stale = compactable_indices[: len(compactable_indices) - _MICROCOMPACT_KEEP_RECENT]
+        updated: list[dict[str, Any]] | None = None
+        for idx in stale:
+            msg = messages[idx]
+            content = msg.get("content")
+            if not isinstance(content, str) or len(content) < _MICROCOMPACT_MIN_CHARS:
+                continue
+            name = msg.get("name", "tool")
+            summary = f"[{name} result omitted from context]"
+            if updated is None:
+                updated = [dict(m) for m in messages]
+            updated[idx]["content"] = summary
+
+        return updated if updated is not None else messages
 
     def _apply_tool_result_budget(
         self,

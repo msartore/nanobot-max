@@ -8,7 +8,7 @@ import json
 import os
 import re
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 from loguru import logger
@@ -84,7 +84,11 @@ class WebSearchTool(Tool):
     """Search the web using configured provider."""
 
     name = "web_search"
-    description = "Search the web. Returns titles, URLs, and snippets."
+    description = (
+        "Search the web. Returns titles, URLs, and snippets. "
+        "count defaults to 5 (max 10). "
+        "Use web_fetch to read a specific page in full."
+    )
 
     def __init__(self, config: WebSearchConfig | None = None, proxy: str | None = None):
         from nanobot.config.schema import WebSearchConfig
@@ -182,10 +186,10 @@ class WebSearchTool(Tool):
             return await self._search_duckduckgo(query, n)
         try:
             headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+            encoded_query = quote(query, safe="")
             async with httpx.AsyncClient(proxy=self.proxy) as client:
                 r = await client.get(
-                    f"https://s.jina.ai/",
-                    params={"q": query},
+                    f"https://s.jina.ai/{encoded_query}",
                     headers=headers,
                     timeout=15.0,
                 )
@@ -197,7 +201,8 @@ class WebSearchTool(Tool):
             ]
             return _format_results(query, items, n)
         except Exception as e:
-            return f"Error: {e}"
+            logger.warning("Jina search failed ({}), falling back to DuckDuckGo", e)
+            return await self._search_duckduckgo(query, n)
 
     async def _search_duckduckgo(self, query: str, n: int) -> str:
         try:
@@ -206,7 +211,10 @@ class WebSearchTool(Tool):
             from ddgs import DDGS
 
             ddgs = DDGS(timeout=10)
-            raw = await asyncio.to_thread(ddgs.text, query, max_results=n)
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(ddgs.text, query, max_results=n),
+                timeout=self.config.timeout,
+            )
             if not raw:
                 return f"No results for: {query}"
             items = [
@@ -235,7 +243,11 @@ class WebFetchTool(Tool):
     """Fetch and extract content from a URL."""
 
     name = "web_fetch"
-    description = "Fetch URL and extract readable content (HTML → markdown/text)."
+    description = (
+        "Fetch a URL and extract readable content (HTML → markdown/text). "
+        "Output is capped at maxChars (default 50 000). "
+        "Works for most web pages and docs; may fail on login-walled or JS-heavy sites."
+    )
 
     def __init__(self, max_chars: int = 50000, proxy: str | None = None):
         self.max_chars = max_chars
