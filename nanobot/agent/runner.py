@@ -40,7 +40,7 @@ _MICROCOMPACT_KEEP_RECENT = 10
 _MICROCOMPACT_MIN_CHARS = 500
 _COMPACTABLE_TOOLS = frozenset({
     "read_file", "exec", "grep", "glob",
-    "web_search", "web_fetch", "list_dir",
+    "web_search", "web_fetch", "htmlunit_fetch", "list_dir",
 })
 _BACKFILL_CONTENT = "[Tool result unavailable — call was interrupted or lost]"
 @dataclass(slots=True)
@@ -218,8 +218,10 @@ class AgentRunner:
             xml_skill_name = self._detect_xml_skill_call(clean)
             if xml_skill_name is not None and response.finish_reason != "error":
                 snippet = (clean or "")[:200].replace("\n", " ")
+                is_registered_tool = xml_skill_name in spec.tools.tool_names
                 logger.warning(
-                    "XML skill call detected on turn {}/{} for {} | skill='{}' | snippet='{}'",
+                    "XML {} call detected on turn {}/{} for {} | name='{}' | snippet='{}'",
+                    "tool" if is_registered_tool else "skill",
                     iteration,
                     spec.max_iterations,
                     spec.session_key or "default",
@@ -228,13 +230,20 @@ class AgentRunner:
                 )
                 if hook.wants_streaming() and _streaming_this_iter:
                     await hook.on_stream_end(context, resuming=True)
-                correction = (
-                    f"`<function={xml_skill_name}>` syntax is not supported. "
-                    f"Skills must be invoked via the `exec` tool. "
-                    f"Use `read_file` on the skill's SKILL.md (see `<location>` in the skills listing), "
-                    f"then call `exec` with the shell command shown there. "
-                    f"The `<baseDir>` value in the skills listing gives you the path to substitute for {{baseDir}}."
-                )
+                if is_registered_tool:
+                    correction = (
+                        f"`{xml_skill_name}` is a registered tool — do not output tool calls as "
+                        f"raw XML text. Issue a proper function call for `{xml_skill_name}` "
+                        f"through the API on your next response."
+                    )
+                else:
+                    correction = (
+                        f"`<function={xml_skill_name}>` syntax is not supported. "
+                        f"Skills must be invoked via the `exec` tool. "
+                        f"Use `read_file` on the skill's SKILL.md (see `<location>` in the skills listing), "
+                        f"then call `exec` with the shell command shown there. "
+                        f"The `<baseDir>` value in the skills listing gives you the path to substitute for {{baseDir}}."
+                    )
                 messages.append(build_assistant_message(
                     clean or "",
                     reasoning_content=response.reasoning_content,
