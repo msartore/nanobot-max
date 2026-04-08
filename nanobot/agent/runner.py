@@ -230,7 +230,50 @@ class AgentRunner:
                 )
                 if hook.wants_streaming() and _streaming_this_iter:
                     await hook.on_stream_end(context, resuming=True)
+
                 if is_registered_tool:
+                    # Models like Qwen consistently ignore text corrections asking them to
+                    # reformat.  Parse the XML call and execute it directly so the loop
+                    # can continue with a real tool result instead of looping forever.
+                    parsed = self._parse_xml_tool_call(clean)
+                    if parsed is not None:
+                        xml_tc_name, xml_tc_args = parsed
+                        xml_tc = ToolCallRequest(
+                            id=f"xml_{iteration}",
+                            name=xml_tc_name,
+                            arguments=xml_tc_args,
+                        )
+                        logger.info(
+                            "Executing XML tool call directly: {}({}) for {}",
+                            xml_tc_name, list(xml_tc_args.keys()),
+                            spec.session_key or "default",
+                        )
+                        # Record the assistant turn with the XML text as its content so
+                        # the conversation history remains coherent.
+                        messages.append(build_assistant_message(
+                            clean or "",
+                            tool_calls=[xml_tc.to_openai_tool_call()],
+                            reasoning_content=response.reasoning_content,
+                            thinking_blocks=response.thinking_blocks,
+                        ))
+                        tools_used.append(xml_tc_name)
+                        xml_results, xml_events, xml_fatal = await self._execute_tools(
+                            spec, [xml_tc], external_lookup_counts,
+                        )
+                        tool_events.extend(xml_events)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": xml_tc.id,
+                            "name": xml_tc_name,
+                            "content": self._normalize_tool_result(
+                                spec, xml_tc.id, xml_tc_name, xml_results[0],
+                            ),
+                        })
+                        empty_content_retries = 0
+                        await hook.after_tool_results(context)
+                        await hook.after_iteration(context)
+                        continue
+                    # Parsing failed — fall back to a correction prompt
                     correction = (
                         f"`{xml_skill_name}` is a registered tool — do not output tool calls as "
                         f"raw XML text. Issue a proper function call for `{xml_skill_name}` "
@@ -251,7 +294,7 @@ class AgentRunner:
                 ))
                 messages.append({"role": "user", "content": correction})
                 logger.debug(
-                    "XML skill redirect correction appended for {} | total messages={}",
+                    "XML call redirect correction appended for {} | total messages={}",
                     spec.session_key or "default",
                     len(messages),
                 )
@@ -510,14 +553,60 @@ class AgentRunner:
         return await self.provider.chat_with_retry(**kwargs)
 
     _XML_SKILL_CALL_RE = re.compile(r"<function=([A-Za-z0-9_:.-]+)\s*>", re.IGNORECASE)
+    # Matches <parameter=KEY>VALUE</parameter> used by Qwen-style XML tool calls
+    _XML_PARAM_RE = re.compile(r'<parameter=([A-Za-z0-9_]+)>([\s\S]*?)</parameter>', re.IGNORECASE)
+    # Matches <parameter name="KEY">VALUE</parameter> (alternative format)
+    _XML_PARAM_NAMED_RE = re.compile(r'<parameter\s+name=["\']([A-Za-z0-9_]+)["\']>([\s\S]*?)</parameter>', re.IGNORECASE)
 
     @classmethod
     def _detect_xml_skill_call(cls, text: str | None) -> str | None:
-        """Return the skill name if text contains a bare <function=name> XML invocation, else None."""
+        """Return the function name if text contains a bare <function=name> XML invocation, else None."""
         if not text or "<function=" not in text:
             return None
         m = cls._XML_SKILL_CALL_RE.search(text)
         return m.group(1) if m else None
+
+    @classmethod
+    def _parse_xml_tool_call(cls, text: str | None) -> tuple[str, dict[str, Any]] | None:
+        """Parse a Qwen-style XML tool call into (tool_name, args_dict).
+
+        Handles two parameter formats::
+
+            <function=web_search>
+            <parameter=query>some text</parameter>
+            </function>
+
+            <function=web_search>
+            <parameter name="query">some text</parameter>
+            </function>
+
+        Returns None if the text cannot be parsed.
+        """
+        if not text or "<function=" not in text:
+            return None
+        m = cls._XML_SKILL_CALL_RE.search(text)
+        if not m:
+            return None
+        tool_name = m.group(1)
+
+        args: dict[str, Any] = {}
+        for pm in cls._XML_PARAM_RE.finditer(text):
+            args[pm.group(1)] = pm.group(2).strip()
+        if not args:
+            for pm in cls._XML_PARAM_NAMED_RE.finditer(text):
+                args[pm.group(1)] = pm.group(2).strip()
+
+        # Last resort: try a JSON object inside <function=...>...</function>
+        if not args:
+            json_m = re.search(r'<function=[^>]+>\s*(\{[\s\S]*?\})\s*(?:</function>|$)', text, re.I)
+            if json_m:
+                import json as _json
+                try:
+                    args = _json.loads(json_m.group(1))
+                except Exception:
+                    pass
+
+        return tool_name, args
 
     _INPUT_VALIDATION_ERROR_MARKERS = (
         "input validation error",
