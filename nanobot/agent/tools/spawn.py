@@ -47,6 +47,8 @@ class SpawnTool(Tool):
 
     async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
         """Spawn a subagent to execute the given task."""
+        from nanobot.agent.tools.guard import warn_if_injected
+        task = warn_if_injected(task)
         return await self._manager.spawn(
             task=task,
             label=label,

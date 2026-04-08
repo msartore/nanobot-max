@@ -100,6 +100,10 @@ class WebSearchTool(Tool):
     def read_only(self) -> bool:
         return True
 
+    @property
+    def untrusted_content(self) -> bool:
+        return True
+
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
         provider = self.config.provider.strip().lower() or "brave"
         n = min(max(count or self.config.max_results, 1), 10)
@@ -255,6 +259,10 @@ class WebFetchTool(Tool):
 
     @property
     def read_only(self) -> bool:
+        return True
+
+    @property
+    def untrusted_content(self) -> bool:
         return True
 
     async def execute(self, url: str, extract_mode: str = "markdown", max_chars: int | None = None, **kwargs: Any) -> Any:

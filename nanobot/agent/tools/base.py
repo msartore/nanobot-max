@@ -157,6 +157,15 @@ class Tool(ABC):
         return False
 
     @property
+    def untrusted_content(self) -> bool:
+        """Whether results from this tool contain externally-sourced, untrusted content.
+
+        When True, ToolRegistry wraps the result in an XML envelope and runs
+        the injection scanner before returning it to the agent.
+        """
+        return False
+
+    @property
     def concurrency_safe(self) -> bool:
         """Whether this tool can run alongside other concurrency-safe tools."""
         return self.read_only and not self.exclusive

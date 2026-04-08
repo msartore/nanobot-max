@@ -76,6 +76,10 @@ class XSearchTool(Tool):
     def read_only(self) -> bool:
         return True
 
+    @property
+    def untrusted_content(self) -> bool:
+        return True
+
     def _api_key(self) -> str:
         return self._config.api_key or os.environ.get("XAI_API_KEY", "")
 

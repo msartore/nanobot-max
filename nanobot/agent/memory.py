@@ -291,7 +291,11 @@ class MemoryStore:
 
     def get_memory_context(self) -> str:
         long_term = self.read_memory()
-        return f"## Long-term Memory\n{long_term}" if long_term else ""
+        if not long_term:
+            return ""
+        from nanobot.agent.tools.guard import warn_if_injected
+        long_term = warn_if_injected(long_term)
+        return f"## Long-term Memory\n{long_term}"
 
     # -- history.jsonl — append-only, JSONL format ---------------------------
 

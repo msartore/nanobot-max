@@ -155,6 +155,14 @@ class BaseChannel(ABC):
             return
 
         meta = metadata or {}
+
+        # Scan forwarded / automated messages for injection attempts.
+        # Channels set _is_forwarded=True in metadata when content originates
+        # from an untrusted third party (e.g. forwarded emails, webhook payloads).
+        if meta.get("_is_forwarded") and content:
+            from nanobot.agent.tools.guard import warn_if_injected
+            content = warn_if_injected(content)
+
         if self.supports_streaming:
             meta = {**meta, "_wants_stream": True}
 

@@ -47,6 +47,10 @@ class HtmlunitFetchTool(Tool):
     def read_only(self) -> bool:
         return True
 
+    @property
+    def untrusted_content(self) -> bool:
+        return True
+
     async def execute(
         self,
         url: str,

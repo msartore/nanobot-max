@@ -84,6 +84,8 @@ class ToolRegistry:
 
     async def execute(self, name: str, params: dict[str, Any]) -> Any:
         """Execute a tool by name with given parameters."""
+        from nanobot.agent.tools.guard import wrap_external
+
         _hint = "\n\n[Analyze the error above and try a different approach.]"
         tool, params, error = self.prepare_call(name, params)
         if error:
@@ -94,6 +96,8 @@ class ToolRegistry:
             result = await tool.execute(**params)
             if isinstance(result, str) and result.startswith("Error"):
                 return result + _hint
+            if tool.untrusted_content:
+                result = wrap_external(name, result)
             return result
         except Exception as e:
             return f"Error executing {name}: {str(e)}" + _hint
