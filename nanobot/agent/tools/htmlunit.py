@@ -93,36 +93,65 @@ class HtmlunitFetchTool(Tool):
             raise RuntimeError(msg)
         return result.stdout
 
+    # Minimum meaningful content length after readability extraction.
+    # Anything shorter means readability found no article body and we should
+    # fall back to full-page text stripping.
+    _MIN_CONTENT_CHARS = 200
+
     def _extract(self, url: str, html: str, max_chars: int) -> str:
+        from nanobot.agent.tools.web import _normalize, _strip_tags
+
+        title = ""
+        text = ""
+        extractor = "raw"
+
+        # Strip XML declaration / processing instructions that confuse parsers
+        clean_html = re.sub(r'<\?xml[^?]*\?>', '', html, count=1).strip()
+
         try:
             from readability import Document
-            from nanobot.agent.tools.web import _normalize, _strip_tags
 
-            doc = Document(html)
+            doc = Document(clean_html)
             summary = doc.summary()
+            title = doc.title() or ""
 
-            text = re.sub(
+            md = re.sub(
                 r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>([\s\S]*?)</a>',
                 lambda m: f'[{_strip_tags(m[2])}]({m[1]})',
                 summary,
                 flags=re.I,
             )
-            text = re.sub(
+            md = re.sub(
                 r'<h([1-6])[^>]*>([\s\S]*?)</h\1>',
                 lambda m: f'\n{"#" * int(m[1])} {_strip_tags(m[2])}\n',
-                text,
+                md,
                 flags=re.I,
             )
-            text = re.sub(r'<li[^>]*>([\s\S]*?)</li>', lambda m: f'\n- {_strip_tags(m[1])}', text, flags=re.I)
-            text = re.sub(r'</(p|div|section|article)>', '\n\n', text, flags=re.I)
-            text = re.sub(r'<(br|hr)\s*/?>', '\n', text, flags=re.I)
-            text = _normalize(_strip_tags(text))
-            if doc.title():
-                text = f"# {doc.title()}\n\n{text}"
+            md = re.sub(r'<li[^>]*>([\s\S]*?)</li>', lambda m: f'\n- {_strip_tags(m[1])}', md, flags=re.I)
+            md = re.sub(r'</(p|div|section|article)>', '\n\n', md, flags=re.I)
+            md = re.sub(r'<(br|hr)\s*/?>', '\n', md, flags=re.I)
+            text = _normalize(_strip_tags(md))
             extractor = "readability"
         except Exception:
-            text = html
-            extractor = "raw"
+            pass
+
+        # Readability sometimes succeeds but returns almost nothing (e.g. JS-heavy
+        # pages where the article text hasn't been rendered into the DOM yet, or
+        # where it only found the site title).  Fall back to stripping all tags
+        # from the full page so we at least return the visible text.
+        if len(text) < self._MIN_CONTENT_CHARS:
+            text = _normalize(_strip_tags(clean_html))
+            extractor = "text-strip"
+            # Re-derive title from <title> tag when readability gave nothing useful
+            if not title:
+                m = re.search(r'<title[^>]*>(.*?)</title>', clean_html, re.I | re.S)
+                title = _strip_tags(m.group(1)).strip() if m else ""
+
+        if title:
+            # Avoid "reuters.com" style domain-only titles polluting the output
+            bare_domain = re.sub(r'^https?://(www\.)?', '', url).split('/')[0]
+            if title.strip().lower() not in (bare_domain.lower(), ""):
+                text = f"# {title}\n\n{text}"
 
         truncated = len(text) > max_chars
         if truncated:
