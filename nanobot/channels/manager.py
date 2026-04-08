@@ -165,10 +165,12 @@ class ChannelManager:
                     )
 
                 if msg.metadata.get("_progress"):
-                    if msg.metadata.get("_tool_hint") and not self.config.channels.send_tool_hints:
-                        continue
-                    if not msg.metadata.get("_tool_hint") and not self.config.channels.send_progress:
-                        continue
+                    is_tool_results = msg.metadata.get("_tool_results", False)
+                    if not is_tool_results:
+                        if msg.metadata.get("_tool_hint") and not self.config.channels.send_tool_hints:
+                            continue
+                        if not msg.metadata.get("_tool_hint") and not self.config.channels.send_progress:
+                            continue
 
                 # Coalesce consecutive _stream_delta messages for the same (channel, chat_id)
                 # to reduce API calls and improve streaming latency
@@ -190,7 +192,12 @@ class ChannelManager:
     @staticmethod
     async def _send_once(channel: BaseChannel, msg: OutboundMessage) -> None:
         """Send one outbound message without retry policy."""
-        if msg.metadata.get("_stream_delta") or msg.metadata.get("_stream_end"):
+        is_editable = (
+            msg.metadata.get("_stream_delta") or
+            msg.metadata.get("_stream_end") or
+            msg.metadata.get("_tool_results")
+        )
+        if is_editable:
             await channel.send_delta(msg.chat_id, msg.content, msg.metadata)
         elif not msg.metadata.get("_streamed"):
             await channel.send(msg)

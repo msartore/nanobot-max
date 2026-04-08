@@ -206,6 +206,7 @@ class AgentRunner:
                     },
                 )
                 empty_content_retries = 0
+                await hook.after_tool_results(context)
                 await hook.after_iteration(context)
                 continue
 

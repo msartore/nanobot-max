@@ -97,6 +97,16 @@ class _LoopHook(AgentHook):
             logger.info("Tool call: {}({})", tc.name, args_str[:200])
         self._loop._set_tool_context(self._channel, self._chat_id, self._message_id)
 
+    async def after_tool_results(self, context: AgentHookContext) -> None:
+        if self._on_progress and context.tool_results:
+            results_formatted = []
+            for tr in context.tool_results:
+                name = tr.get("name", "unknown")
+                content = tr.get("content", "")
+                results_formatted.append(f"*{name}*\n{content[:500]}")
+            results_text = "\n\n".join(results_formatted)
+            await self._on_progress(results_text, tool_results=True)
+
     async def after_iteration(self, context: AgentHookContext) -> None:
         u = context.usage or {}
         logger.debug(
@@ -562,10 +572,11 @@ class AgentLoop:
             channel=msg.channel, chat_id=msg.chat_id,
         )
 
-        async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
+        async def _bus_progress(content: str, *, tool_hint: bool = False, tool_results: bool = False) -> None:
             meta = dict(msg.metadata or {})
             meta["_progress"] = True
             meta["_tool_hint"] = tool_hint
+            meta["_tool_results"] = tool_results
             await self.bus.publish_outbound(OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))

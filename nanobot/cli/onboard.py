@@ -1018,6 +1018,6 @@ def run_onboard(initial_config: Config | None = None) -> OnboardResult:
         if answer == "[X] Exit Without Saving":
             return OnboardResult(config=original_config, should_save=False)
 
-        action_fn = _MENU_DISPATCH.get(answer)
+        action_fn = menu_dispatch.get(answer)
         if action_fn:
             action_fn()
