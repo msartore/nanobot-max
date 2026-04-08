@@ -11,7 +11,6 @@ from typing import Any
 from loguru import logger
 
 from nanobot.agent.hook import AgentHook, AgentHookContext
-from nanobot.utils.prompt_templates import render_template
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.providers.base import LLMProvider, ToolCallRequest
 from nanobot.utils.helpers import (
@@ -22,10 +21,11 @@ from nanobot.utils.helpers import (
     maybe_persist_tool_result,
     truncate_text,
 )
+from nanobot.utils.prompt_templates import render_template
 from nanobot.utils.runtime import (
     EMPTY_FINAL_RESPONSE_MESSAGE,
-    build_finalization_retry_message,
     build_completion_check_message,
+    build_finalization_retry_message,
     ensure_nonempty_tool_result,
     is_blank_text,
     is_completion_confirmed,
@@ -104,7 +104,6 @@ class AgentRunner:
         completion_check_rounds = 0
         _suppress_streaming = False  # True when next call is a completion-check confirmation
         empty_content_retries = 0
-        length_recovery_count = 0
 
         for iteration in range(spec.max_iterations):
             # Capture and reset the per-iteration streaming suppression flag.
