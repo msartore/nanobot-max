@@ -146,7 +146,7 @@ class SkillsLoader:
 
             # Show missing requirements for unavailable skills
             if not available:
-                missing = self._get_missing_requirements(meta)
+                missing = self._get_missing_requirements(skill_meta)
                 if missing:
                     lines.append(f"    <requires>{_escape_xml(missing)}</requires>")
             lines.append("  </skill>")

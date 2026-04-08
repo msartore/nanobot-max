@@ -103,6 +103,8 @@ class AgentRunner:
         external_lookup_counts: dict[str, int] = {}
         completion_check_rounds = 0
         _suppress_streaming = False  # True when next call is a completion-check confirmation
+        empty_content_retries = 0
+        length_recovery_count = 0
 
         for iteration in range(spec.max_iterations):
             # Capture and reset the per-iteration streaming suppression flag.
