@@ -1,8 +1,20 @@
+# ---- Stage 1: Build HtmlUnit JARs with Maven ----
+FROM maven:3.9-eclipse-temurin-17 AS maven-builder
+
+WORKDIR /build
+COPY nanobot/java/pom.xml .
+COPY nanobot/java/src ./src
+
+# Download dependencies and compile; maven-dependency-plugin copies deps to target/dependency/
+RUN mvn -q package -DskipTests
+
+# ---- Stage 2: Runtime ----
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
-# Install Node.js 20 for the WhatsApp bridge
+# Install Node.js 20 for the WhatsApp bridge + Java 17 JRE for HtmlUnit
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates gnupg git bubblewrap openssh-client && \
+    apt-get install -y --no-install-recommends curl ca-certificates gnupg git bubblewrap openssh-client \
+        openjdk-17-jre-headless && \
     mkdir -p /etc/apt/keyrings && \
     curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
     echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" > /etc/apt/sources.list.d/nodesource.list && \
@@ -13,6 +25,10 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# Copy HtmlUnit JARs from build stage
+COPY --from=maven-builder /build/target/dependency /app/htmlunit/
+COPY --from=maven-builder /build/target/nanobot-scraper-1.0.jar /app/htmlunit/
 
 # Install Python dependencies first (cached layer)
 COPY pyproject.toml README.md LICENSE ./

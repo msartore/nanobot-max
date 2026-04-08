@@ -47,6 +47,24 @@ Do NOT use `read_file` to send files — that only reads content for your own an
 - Prefer this over `exec` for code and history searches
 - Binary or oversized files may be skipped to keep results readable
 
+## web_fetch vs htmlunit_fetch — Choosing the Right Web Tool
+
+`web_fetch` is the default tool for fetching web pages. Use it first.
+
+Use `htmlunit_fetch` when:
+- `web_fetch` returns empty, minimal, or clearly incomplete content
+- The page is known to be a Single-Page Application (SPA) or heavily JavaScript-rendered (React, Vue, Angular, etc.)
+- The page shows a loading spinner / "JavaScript required" message when fetched without JS
+- You need to scrape content that is only rendered after JS execution (e.g. dynamic tables, lazy-loaded text)
+
+`htmlunit_fetch` runs a real headless browser (HtmlUnit/Java) that executes JavaScript before returning the page.
+It is slower than `web_fetch` (~5–30 s) so only use it when `web_fetch` is insufficient.
+
+Parameters:
+- `url` — required
+- `jsWaitMs` — milliseconds to wait for JS to finish (default 3 000; increase to 8 000–15 000 for slow SPAs)
+- `maxChars` — max characters of output (default 50 000)
+
 ## cron — Scheduled Reminders
 
 - Please refer to cron skill for usage.
