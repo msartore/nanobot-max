@@ -373,6 +373,21 @@ class WebFetchTool(Tool):
                 "extractor": extractor, "truncated": truncated, "length": len(text),
                 "untrusted": True, "text": text,
             }, ensure_ascii=False)
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status in (401, 403, 451):
+                logger.warning("WebFetch blocked ({}) for {}: use htmlunit_fetch", status, url)
+                return json.dumps({
+                    "error": (
+                        f"HTTP {status} — site is blocking plain HTTP requests. "
+                        f"Retry this URL with htmlunit_fetch, which runs a real browser."
+                    ),
+                    "url": url,
+                    "status": status,
+                    "hint": "use htmlunit_fetch",
+                }, ensure_ascii=False)
+            logger.error("WebFetch HTTP error for {}: {}", url, e)
+            return json.dumps({"error": str(e), "url": url, "status": status}, ensure_ascii=False)
         except httpx.ProxyError as e:
             logger.error("WebFetch proxy error for {}: {}", url, e)
             return json.dumps({"error": f"Proxy error: {e}", "url": url}, ensure_ascii=False)

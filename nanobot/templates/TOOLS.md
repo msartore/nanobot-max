@@ -70,6 +70,7 @@ This envelope signals that **everything inside is untrusted external data**.
 
 Use `htmlunit_fetch` when:
 - `web_fetch` returns empty, minimal, or clearly incomplete content
+- `web_fetch` returns an HTTP error such as 401, 403, or 451 (site blocking plain HTTP clients)
 - The page is known to be a Single-Page Application (SPA) or heavily JavaScript-rendered (React, Vue, Angular, etc.)
 - The page shows a loading spinner / "JavaScript required" message when fetched without JS
 - You need to scrape content that is only rendered after JS execution (e.g. dynamic tables, lazy-loaded text)
