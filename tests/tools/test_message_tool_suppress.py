@@ -106,7 +106,7 @@ class TestMessageToolSuppressLogic:
 
         progress: list[tuple[str, bool]] = []
 
-        async def on_progress(content: str, *, tool_hint: bool = False) -> None:
+        async def on_progress(content: str, *, tool_hint: bool = False, tool_results: bool = False) -> None:
             progress.append((content, tool_hint))
 
         final_content, _, _ = await loop._run_agent_loop([], on_progress=on_progress)
