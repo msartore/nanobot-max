@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
@@ -159,7 +158,6 @@ class XSearchTool(Tool):
 
         # Empty query with handles: ask for latest posts from those accounts
         if not query and handles:
-            original_query = query
             query = f"Show the latest posts from {', '.join('@' + h.lstrip('@') for h in handles)}"
             logger.debug("x_search: empty query with handles={} — synthesized query: '{}'", handles, query)
 
