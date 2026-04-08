@@ -257,8 +257,8 @@ class WebFetchTool(Tool):
     def read_only(self) -> bool:
         return True
 
-    async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> Any:
-        max_chars = maxChars or self.max_chars
+    async def execute(self, url: str, extract_mode: str = "markdown", max_chars: int | None = None, **kwargs: Any) -> Any:
+        max_chars = max_chars or self.max_chars
         is_valid, error_msg = _validate_url_safe(url)
         if not is_valid:
             return json.dumps({"error": f"URL validation failed: {error_msg}", "url": url}, ensure_ascii=False)

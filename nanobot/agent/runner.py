@@ -582,7 +582,7 @@ class AgentRunner:
         tool_call: ToolCallRequest,
         external_lookup_counts: dict[str, int],
     ) -> tuple[Any, dict[str, str], BaseException | None]:
-        _HINT = "\n\n[Analyze the error above and try a different approach.]"
+        _hint = "\n\n[Analyze the error above and try a different approach.]"
         lookup_error = repeated_external_lookup_error(
             tool_call.name,
             tool_call.arguments,
@@ -595,8 +595,8 @@ class AgentRunner:
                 "detail": "repeated external lookup blocked",
             }
             if spec.fail_on_tool_error:
-                return lookup_error + _HINT, event, RuntimeError(lookup_error)
-            return lookup_error + _HINT, event, None
+                return lookup_error + _hint, event, RuntimeError(lookup_error)
+            return lookup_error + _hint, event, None
         prepare_call = getattr(spec.tools, "prepare_call", None)
         tool, params, prep_error = None, tool_call.arguments, None
         if callable(prepare_call):
@@ -612,7 +612,7 @@ class AgentRunner:
                 "status": "error",
                 "detail": prep_error.split(": ", 1)[-1][:120],
             }
-            return prep_error + _HINT, event, RuntimeError(prep_error) if spec.fail_on_tool_error else None
+            return prep_error + _hint, event, RuntimeError(prep_error) if spec.fail_on_tool_error else None
         try:
             if tool is not None:
                 result = await tool.execute(**params)
@@ -637,8 +637,8 @@ class AgentRunner:
                 "detail": result.replace("\n", " ").strip()[:120],
             }
             if spec.fail_on_tool_error:
-                return result + _HINT, event, RuntimeError(result)
-            return result + _HINT, event, None
+                return result + _hint, event, RuntimeError(result)
+            return result + _hint, event, None
 
         detail = "" if result is None else str(result)
         detail = detail.replace("\n", " ").strip()
