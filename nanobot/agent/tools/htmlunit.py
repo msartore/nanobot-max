@@ -60,6 +60,10 @@ class HtmlunitFetchTool(Tool):
     ) -> str:
         from nanobot.agent.tools.web import _validate_url_safe
 
+        # Accept camelCase param names as sent by the LLM (schema uses maxChars/jsWaitMs)
+        max_chars = max_chars or kwargs.get("maxChars")
+        js_wait_ms = kwargs.get("jsWaitMs", js_wait_ms)
+
         is_valid, error_msg = _validate_url_safe(url)
         if not is_valid:
             return json.dumps({"error": f"URL validation failed: {error_msg}", "url": url}, ensure_ascii=False)
