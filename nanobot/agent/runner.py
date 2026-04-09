@@ -311,6 +311,7 @@ class AgentRunner:
                         empty_content_retries,
                         _MAX_EMPTY_RETRIES,
                     )
+                    messages.append(build_finalization_retry_message())
                     if hook.wants_streaming():
                         await hook.on_stream_end(context, resuming=False)
                     await hook.after_iteration(context)

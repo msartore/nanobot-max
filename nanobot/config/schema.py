@@ -78,6 +78,7 @@ class AgentDefaults(Base):
     provider_retry_mode: Literal["standard", "persistent"] = "standard"
     reasoning_effort: str | None = None  # low / medium / high / adaptive - enables LLM thinking mode
     timezone: str = "UTC"  # IANA timezone, e.g. "Asia/Shanghai", "America/New_York"
+    unified_session: bool = False  # Route all channels into a single shared session
     dream: DreamConfig = Field(default_factory=DreamConfig)
 
 

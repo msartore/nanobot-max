@@ -674,16 +674,10 @@ class TelegramChannel(BaseChannel):
                 raise  # Let ChannelManager handle retry
         elif (now - buf.last_edit) >= self.config.stream_edit_interval:
             try:
-                await self._call_with_retry(
-                    self._app.bot.edit_message_text,
-                    chat_id=int_chat_id, message_id=buf.message_id,
-                    text=buf.text,
-                )
-                buf.last_edit = now
-            except Exception as e:
-                if self._is_not_modified_error(e):
+                result = await self._try_edit_message(int_chat_id, buf.message_id, buf.text)
+                if result in ("ok", "not_modified", "too_long"):
                     buf.last_edit = now
-                    return
+            except Exception as e:
                 logger.warning("Stream edit failed: {}", e)
                 raise  # Let ChannelManager handle retry
 

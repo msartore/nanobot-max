@@ -127,6 +127,9 @@ class _LoopHook(AgentHook):
     def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
         return self._loop._strip_think(content)
 
+UNIFIED_SESSION_KEY = "unified:default"
+
+
 class AgentLoop:
     """
     The agent loop is the core processing engine.
@@ -164,6 +167,7 @@ class AgentLoop:
         hooks: list[AgentHook] | None = None,
         max_completion_checks: int | None = None,
         context_compact_threshold_tokens: int | None = None,
+        unified_session: bool = False,
     ):
         from nanobot.config.schema import ExecToolConfig, WebToolsConfig
 
@@ -222,6 +226,7 @@ class AgentLoop:
             restrict_to_workspace=restrict_to_workspace,
         )
 
+        self._unified_session = unified_session
         self._running = False
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
@@ -422,12 +427,16 @@ class AgentLoop:
                 if result:
                     await self.bus.publish_outbound(result)
                 continue
+            if self._unified_session and not msg.session_key_override:
+                msg.session_key_override = UNIFIED_SESSION_KEY
             task = asyncio.create_task(self._dispatch(msg))
             self._active_tasks.setdefault(msg.session_key, []).append(task)
             task.add_done_callback(lambda t, k=msg.session_key: self._active_tasks.get(k, []) and self._active_tasks[k].remove(t) if t in self._active_tasks.get(k, []) else None)
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process a message: per-session serial, cross-session concurrent."""
+        if self._unified_session and not msg.session_key_override:
+            msg.session_key_override = UNIFIED_SESSION_KEY
         lock = self._session_locks.setdefault(msg.session_key, asyncio.Lock())
         gate = self._concurrency_gate or nullcontext()
         async with lock, gate:

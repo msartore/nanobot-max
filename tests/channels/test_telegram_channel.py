@@ -454,6 +454,26 @@ async def test_send_delta_incremental_edit_treats_not_modified_as_success() -> N
 
 
 @pytest.mark.asyncio
+async def test_send_delta_incremental_edit_skips_silently_when_too_long() -> None:
+    """Mid-stream edits that hit Message_too_long must not raise (no retry loop)."""
+    from telegram.error import BadRequest
+
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["*"]),
+        MessageBus(),
+    )
+    channel._app = _FakeApp(lambda: None)
+    channel._stream_bufs["123"] = _StreamBuf(text="x" * 5000, message_id=7, last_edit=0.0, stream_id="s:0")
+    channel._app.bot.edit_message_text = AsyncMock(side_effect=BadRequest("message is message_too_long"))
+
+    # Must not raise — the final _stream_end will handle splitting
+    await channel.send_delta("123", "", {"_stream_delta": True, "_stream_id": "s:0"})
+
+    # last_edit is updated so the next tick doesn't immediately retry
+    assert channel._stream_bufs["123"].last_edit > 0.0
+
+
+@pytest.mark.asyncio
 async def test_send_delta_initial_send_keeps_message_in_thread() -> None:
     channel = TelegramChannel(
         TelegramConfig(enabled=True, token="123:abc", allow_from=["*"]),
