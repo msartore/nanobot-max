@@ -11,6 +11,13 @@ import datetime as datetime_module
 from nanobot.agent.context import ContextBuilder
 
 
+def _prompt_text(prompt: str | list) -> str:
+    """Extract plain text from build_system_prompt() result (str or list[dict])."""
+    if isinstance(prompt, list):
+        return "\n\n---\n\n".join(b.get("text", "") for b in prompt if isinstance(b, dict))
+    return prompt
+
+
 class _FakeDatetime(real_datetime):
     current = real_datetime(2026, 2, 24, 13, 59)
 
@@ -95,7 +102,7 @@ def test_unprocessed_history_injected_into_system_prompt(tmp_path) -> None:
     builder.memory.append_history("User asked about weather in Tokyo")
     builder.memory.append_history("Agent fetched forecast via web_search")
 
-    prompt = builder.build_system_prompt()
+    prompt = _prompt_text(builder.build_system_prompt())
     assert "# Recent History" in prompt
     assert "User asked about weather in Tokyo" in prompt
     assert "Agent fetched forecast via web_search" in prompt
@@ -110,7 +117,7 @@ def test_recent_history_capped_at_max(tmp_path) -> None:
     for i in range(builder._MAX_RECENT_HISTORY + 20):
         builder.memory.append_history(f"entry-{i}")
 
-    prompt = builder.build_system_prompt()
+    prompt = _prompt_text(builder.build_system_prompt())
     assert "entry-0" not in prompt
     assert "entry-19" not in prompt
     assert f"entry-{builder._MAX_RECENT_HISTORY + 19}" in prompt
@@ -124,7 +131,7 @@ def test_no_recent_history_when_dream_has_processed_all(tmp_path) -> None:
     cursor = builder.memory.append_history("already processed entry")
     builder.memory.set_last_dream_cursor(cursor)
 
-    prompt = builder.build_system_prompt()
+    prompt = _prompt_text(builder.build_system_prompt())
     assert "# Recent History" not in prompt
 
 
@@ -140,7 +147,7 @@ def test_partial_dream_processing_shows_only_remainder(tmp_path) -> None:
 
     builder.memory.set_last_dream_cursor(c2)
 
-    prompt = builder.build_system_prompt()
+    prompt = _prompt_text(builder.build_system_prompt())
     assert "# Recent History" in prompt
     assert "old conversation about Python" not in prompt
     assert "old conversation about Rust" not in prompt

@@ -29,40 +29,59 @@ class ContextBuilder:
         self,
         skill_names: list[str] | None = None,
         channel: str | None = None,
-    ) -> str:
-        """Build the system prompt from identity, bootstrap files, memory, and skills."""
-        parts = [self._get_identity(channel=channel)]
+    ) -> str | list[dict[str, Any]]:
+        """Build the system prompt from identity, bootstrap files, memory, and skills.
+
+        Returns a plain string when there are no dynamic parts, or a two-element list
+        ``[stable_block, dynamic_block]`` when a context summary or recent history is
+        present.  Providers that support multiple cache breakpoints (Anthropic) can
+        cache the stable prefix across turns; providers that require a string receive
+        a flattened version via their own conversion layer.
+        """
+        # --- stable parts: rarely change between turns ---
+        stable_parts = [self._get_identity(channel=channel)]
 
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
-            parts.append(bootstrap)
+            stable_parts.append(bootstrap)
 
         memory = self.memory.get_memory_context()
         if memory:
-            parts.append(f"# Memory\n\n{memory}")
-
-        context_summary = self.memory.load_context_summary()
-        if context_summary:
-            parts.append(f"# Context Summary\n\n{context_summary}")
+            stable_parts.append(f"# Memory\n\n{memory}")
 
         always_skills = self.skills.get_always_skills()
         if always_skills:
             always_content = self.skills.load_skills_for_context(always_skills)
             if always_content:
-                parts.append(f"# Active Skills\n\n{always_content}")
+                stable_parts.append(f"# Active Skills\n\n{always_content}")
 
         skills_summary = self.skills.build_skills_summary()
         if skills_summary:
-            parts.append(render_template("agent/skills_section.md", skills_summary=skills_summary))
+            stable_parts.append(render_template("agent/skills_section.md", skills_summary=skills_summary))
+
+        stable_text = "\n\n---\n\n".join(stable_parts)
+
+        # --- dynamic parts: change only on consolidation or Dream runs (infrequent) ---
+        # Context summary is intentionally excluded: session messages carry recent context,
+        # and history.jsonl entries (below) cover consolidated old turns.  The summary
+        # would duplicate both and grow every turn, wasting tokens.
+        dynamic_parts: list[str] = []
 
         entries = self.memory.read_unprocessed_history(since_cursor=self.memory.get_last_dream_cursor())
         if entries:
             capped = entries[-self._MAX_RECENT_HISTORY:]
-            parts.append("# Recent History\n\n" + "\n".join(
+            dynamic_parts.append("# Recent History\n\n" + "\n".join(
                 f"- [{e['timestamp']}] {e['content']}" for e in capped
             ))
 
-        return "\n\n---\n\n".join(parts)
+        if not dynamic_parts:
+            return stable_text
+
+        # Two-block form lets providers place a cache breakpoint after the stable prefix.
+        return [
+            {"type": "text", "text": stable_text},
+            {"type": "text", "text": "\n\n---\n\n".join(dynamic_parts)},
+        ]
 
     def _get_identity(self, channel: str | None = None) -> str:
         """Get the core identity section."""

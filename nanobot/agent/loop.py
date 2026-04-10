@@ -554,7 +554,6 @@ class AgentLoop:
             self._clear_runtime_checkpoint(session)
             self.sessions.save(session)
             self._schedule_background(self.consolidator.maybe_consolidate_by_tokens(session))
-            self._schedule_background(self._update_context_summary(session, all_msgs, history))
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
 
@@ -616,9 +615,6 @@ class AgentLoop:
         self._clear_runtime_checkpoint(session)
         self.sessions.save(session)
         self._schedule_background(self.consolidator.maybe_consolidate_by_tokens(session))
-
-        # Update context summary with turn summary
-        self._schedule_background(self._update_context_summary(session, all_msgs, history))
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             # Message tool already sent content - don't send duplicate final response
@@ -753,25 +749,17 @@ class AgentLoop:
         except Exception as exc:
             logger.warning("Failed to update context summary: {}", exc)
 
+    @staticmethod
     def _maybe_initialize_context_summary(
-        self,
         history: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Initialize context summary from history if needed, return cleared history."""
-        context_summary = self.context.memory.load_context_summary()
-        if not context_summary:
-            if history:
-                initial_summary = "Session started.\n\n"
-                for m in history[:5]:
-                    role = m.get("role", "?").upper()
-                    content = m.get("content", "")
-                    if isinstance(content, str) and len(content) > 200:
-                        content = content[:200] + "..."
-                    initial_summary += f"- [{role}] {content}\n"
-                self.context.memory.save_context_summary(initial_summary)
-                logger.info("Initial context summary created")
-            return []  # Clear history after creating summary
-        return []  # No summary needed, clear history anyway
+        """Return session history for the model.
+
+        Recent messages carry precise context directly; the system prompt's
+        "Recent History" section covers consolidated older turns via history.jsonl.
+        The context summary file is no longer updated per-turn.
+        """
+        return history
 
     def _clear_runtime_checkpoint(self, session: Session) -> None:
         if self._RUNTIME_CHECKPOINT_KEY in session.metadata:

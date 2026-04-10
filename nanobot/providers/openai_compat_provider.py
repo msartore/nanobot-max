@@ -189,7 +189,24 @@ class OpenAICompatProvider(LLMProvider):
         cache_marker = {"type": "ephemeral"}
         new_messages = list(messages)
 
-        def _mark(msg: dict[str, Any]) -> dict[str, Any]:
+        def _mark_all_blocks(msg: dict[str, Any]) -> dict[str, Any]:
+            """Mark every text block so each acts as an independent cache breakpoint."""
+            content = msg.get("content")
+            if isinstance(content, str):
+                return {**msg, "content": [
+                    {"type": "text", "text": content, "cache_control": cache_marker},
+                ]}
+            if isinstance(content, list) and content:
+                nc = [
+                    {**block, "cache_control": cache_marker}
+                    if isinstance(block, dict) and block.get("type") == "text"
+                    else block
+                    for block in content
+                ]
+                return {**msg, "content": nc}
+            return msg
+
+        def _mark_last_block(msg: dict[str, Any]) -> dict[str, Any]:
             content = msg.get("content")
             if isinstance(content, str):
                 return {**msg, "content": [
@@ -202,9 +219,9 @@ class OpenAICompatProvider(LLMProvider):
             return msg
 
         if new_messages and new_messages[0].get("role") == "system":
-            new_messages[0] = _mark(new_messages[0])
+            new_messages[0] = _mark_all_blocks(new_messages[0])
         if len(new_messages) >= 3:
-            new_messages[-2] = _mark(new_messages[-2])
+            new_messages[-2] = _mark_last_block(new_messages[-2])
 
         new_tools = tools
         if tools:
@@ -212,6 +229,24 @@ class OpenAICompatProvider(LLMProvider):
             for idx in cls._tool_cache_marker_indices(new_tools):
                 new_tools[idx] = {**new_tools[idx], "cache_control": cache_marker}
         return new_messages, new_tools
+
+    @staticmethod
+    def _flatten_system_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Flatten list-form system content to a plain string.
+
+        build_system_prompt() may return a list of blocks when dynamic parts exist.
+        Standard OpenAI-compatible APIs require a string for system content.
+        """
+        if not messages or messages[0].get("role") != "system":
+            return messages
+        content = messages[0].get("content")
+        if not isinstance(content, list):
+            return messages
+        text = "\n\n---\n\n".join(
+            block["text"] for block in content
+            if isinstance(block, dict) and block.get("type") == "text" and block.get("text")
+        )
+        return [{**messages[0], "content": text}, *messages[1:]]
 
     @staticmethod
     def _normalize_tool_call_id(tool_call_id: Any) -> Any:
@@ -283,10 +318,14 @@ class OpenAICompatProvider(LLMProvider):
         model_name = model or self.default_model
         spec = self._spec
 
-        if spec and spec.supports_prompt_caching:
-            model_name = model or self.default_model
-            if any(model_name.lower().startswith(k) for k in ("anthropic/", "claude")):
-                messages, tools = self._apply_cache_control(messages, tools)
+        use_cache_control = (
+            spec and spec.supports_prompt_caching
+            and any(model_name.lower().startswith(k) for k in ("anthropic/", "claude"))
+        )
+        if use_cache_control:
+            messages, tools = self._apply_cache_control(messages, tools)
+        else:
+            messages = self._flatten_system_content(messages)
 
         if spec and spec.strip_model_prefix:
             model_name = model_name.split("/")[-1]
