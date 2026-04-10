@@ -79,7 +79,8 @@ class ExecTool(Tool):
             "Prefer read_file/write_file/edit_file over cat/echo/sed, "
             "and grep/glob over shell find/grep. "
             "Use -y or --yes flags to avoid interactive prompts. "
-            "Output is truncated at 10 000 chars; timeout defaults to 60s."
+            "Output is truncated at 10 000 chars; timeout defaults to 60s. "
+            "Use relative paths or $WORKSPACE for workspace files (e.g. ls $WORKSPACE/memory/)."
         )
 
     @property
@@ -91,6 +92,7 @@ class ExecTool(Tool):
         timeout: int | None = None, **kwargs: Any,
     ) -> str:
         cwd = working_dir or self.working_dir or os.getcwd()
+        command = self._rewrite_workspace_paths(command, cwd)
         guard_error = self._guard_command(command, cwd)
         if guard_error:
             return guard_error
@@ -196,6 +198,23 @@ class ExecTool(Tool):
                 except (ProcessLookupError, ChildProcessError) as e:
                     logger.debug("Process already reaped or not found: {}", e)
 
+    def _rewrite_workspace_paths(self, command: str, cwd: str) -> str:
+        """Replace absolute paths that point to the wrong workspace root with the real one.
+
+        When the agent has a stale workspace path in memory (e.g. /root/.nanobot/workspace
+        from a previous root-run) it may embed that path in shell commands.  We detect any
+        absolute path that ends with the standard nanobot workspace suffix
+        (``/.nanobot/workspace``) and replace it with the actual workspace, so the command
+        runs against the correct directory.
+        """
+        if not self.working_dir:
+            return command
+
+        real_ws = str(Path(self.working_dir).resolve())
+        # Match absolute paths ending with /.nanobot/workspace (any leading user home)
+        pattern = re.compile(r"(/[^\s\"']*\.nanobot/workspace)")
+        return pattern.sub(lambda _: real_ws, command)
+
     def _build_env(self) -> dict[str, str]:
         """Build a minimal environment for subprocess execution.
 
@@ -206,9 +225,10 @@ class ExecTool(Tool):
         set of system variables (including PATH) is forwarded.  API keys and
         other secrets are still excluded.
         """
+        workspace = str(Path(self.working_dir).resolve()) if self.working_dir else ""
         if _IS_WINDOWS:
             sr = os.environ.get("SYSTEMROOT", r"C:\Windows")
-            return {
+            env = {
                 "SYSTEMROOT": sr,
                 "COMSPEC": os.environ.get("COMSPEC", f"{sr}\\system32\\cmd.exe"),
                 "USERPROFILE": os.environ.get("USERPROFILE", ""),
@@ -219,12 +239,16 @@ class ExecTool(Tool):
                 "PATHEXT": os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD"),
                 "PATH": os.environ.get("PATH", f"{sr}\\system32;{sr}"),
             }
-        home = os.environ.get("HOME", "/tmp")
-        return {
-            "HOME": home,
-            "LANG": os.environ.get("LANG", "C.UTF-8"),
-            "TERM": os.environ.get("TERM", "dumb"),
-        }
+        else:
+            home = os.environ.get("HOME", "/tmp")
+            env = {
+                "HOME": home,
+                "LANG": os.environ.get("LANG", "C.UTF-8"),
+                "TERM": os.environ.get("TERM", "dumb"),
+            }
+        if workspace:
+            env["WORKSPACE"] = workspace
+        return env
 
     def _guard_command(self, command: str, cwd: str) -> str | None:
         """Best-effort safety guard for potentially destructive commands."""

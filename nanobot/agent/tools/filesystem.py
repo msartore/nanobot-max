@@ -26,6 +26,19 @@ def _resolve_path(
     p = Path(path).expanduser()
     if not p.is_absolute() and workspace:
         p = workspace / p
+    elif p.is_absolute() and workspace:
+        # If the absolute path is not under the workspace, try re-interpreting
+        # it as workspace-relative by stripping the leading separator.
+        # This handles cases where the model emits "/memory/..." instead of
+        # "memory/..." — a common mistake when the model knows the logical
+        # layout but constructs paths as if the workspace were the root.
+        resolved_candidate = p.resolve()
+        ws_resolved = workspace.resolve()
+        if not _is_under(resolved_candidate, ws_resolved):
+            # Strip leading slash(es) and join with workspace
+            relative_str = path.lstrip("/\\")
+            if relative_str:
+                p = workspace / relative_str
     resolved = p.resolve()
     if allowed_dir:
         media_path = get_media_dir().resolve()
