@@ -998,7 +998,51 @@ def agent(
         if hasattr(signal, 'SIGPIPE'):
             signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
+        async def on_cron_job(job):
+            from nanobot.agent.tools.cron import CronTool
+            from nanobot.bus.events import OutboundMessage
+
+            if job.name == "dream":
+                try:
+                    await agent_loop.dream.run()
+                except Exception:
+                    logger.exception("Dream cron job failed")
+                return None
+
+            reminder_note = (
+                "[Scheduled Task] Timer finished.\n\n"
+                f"Task '{job.name}' has been triggered.\n"
+                f"Scheduled instruction: {job.payload.message}"
+            )
+
+            cron_tool = agent_loop.tools.get("cron")
+            cron_token = None
+            if isinstance(cron_tool, CronTool):
+                cron_token = cron_tool.set_cron_context(True)
+            try:
+                resp = await agent_loop.process_direct(
+                    reminder_note,
+                    session_key=f"cron:{job.id}",
+                    channel=job.payload.channel or cli_channel,
+                    chat_id=job.payload.to or cli_chat_id,
+                )
+            finally:
+                if isinstance(cron_tool, CronTool) and cron_token is not None:
+                    cron_tool.reset_cron_context(cron_token)
+
+            response = resp.content if resp else ""
+            if job.payload.deliver and response:
+                await bus.publish_outbound(OutboundMessage(
+                    channel=job.payload.channel or cli_channel,
+                    chat_id=job.payload.to or cli_chat_id,
+                    content=response,
+                ))
+            return response
+
+        cron.on_job = on_cron_job
+
         async def run_interactive():
+            await cron.start()
             bus_task = asyncio.create_task(agent_loop.run())
             turn_done = asyncio.Event()
             turn_done.set()
@@ -1103,6 +1147,7 @@ def agent(
                         console.print("\nGoodbye!")
                         break
             finally:
+                cron.stop()
                 agent_loop.stop()
                 outbound_task.cancel()
                 await asyncio.gather(bus_task, outbound_task, return_exceptions=True)
