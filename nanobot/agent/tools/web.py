@@ -346,11 +346,12 @@ class WebFetchTool(Tool):
             truncated = len(text) > max_chars
             if truncated:
                 text = text[:max_chars]
+            text_length = len(text)
             text = f"{_UNTRUSTED_BANNER}\n\n{text}"
 
             return json.dumps({
                 "url": url, "finalUrl": data.get("url", url), "status": r.status_code,
-                "extractor": "jina", "truncated": truncated, "length": len(text),
+                "extractor": "jina", "truncated": truncated, "length": text_length,
                 "untrusted": True, "text": text,
             }, ensure_ascii=False)
         except Exception as e:
@@ -393,11 +394,12 @@ class WebFetchTool(Tool):
             truncated = len(text) > max_chars
             if truncated:
                 text = text[:max_chars]
+            text_length = len(text)
             text = f"{_UNTRUSTED_BANNER}\n\n{text}"
 
             return json.dumps({
                 "url": url, "finalUrl": str(r.url), "status": r.status_code,
-                "extractor": extractor, "truncated": truncated, "length": len(text),
+                "extractor": extractor, "truncated": truncated, "length": text_length,
                 "untrusted": True, "text": text,
             }, ensure_ascii=False)
         except httpx.HTTPStatusError as e:

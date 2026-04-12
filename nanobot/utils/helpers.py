@@ -203,6 +203,15 @@ def maybe_persist_tool_result(
     suffix = "txt"
     if isinstance(content, str):
         text_payload = content
+        # Re-indent compact JSON strings so the saved file has multiple lines
+        # and the agent can use line-based offset to paginate through it.
+        if text_payload.startswith("{") or text_payload.startswith("["):
+            try:
+                parsed = json.loads(text_payload)
+                text_payload = json.dumps(parsed, ensure_ascii=False, indent=2)
+                suffix = "json"
+            except (json.JSONDecodeError, ValueError):
+                pass
     elif isinstance(content, list):
         text_payload = stringify_text_blocks(content)
         if text_payload is None:
