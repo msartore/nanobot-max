@@ -426,7 +426,7 @@ def _make_provider(config: Config):
             console.print("Set them in ~/.nanobot/config.json under providers.azure_openai section")
             console.print("Use the model field to specify the deployment name.")
             raise typer.Exit(1)
-    elif backend == "openai_compat" and not model.startswith("bedrock/"):
+    elif backend == "openai_compat" and not (isinstance(model, str) and model.startswith("bedrock/")):
         needs_key = not (p and p.api_key)
         exempt = spec and (spec.is_oauth or spec.is_local or spec.is_direct)
         if needs_key and not exempt:

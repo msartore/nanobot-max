@@ -258,7 +258,14 @@ class Config(BaseSettings):
                 return (p, spec.name) if p else (None, None)
             return None, None
 
-        model_lower = (model or self.agents.defaults.model).lower()
+        resolved = model or self.agents.defaults.model
+        if isinstance(resolved, list):
+            for m in resolved:
+                result = self._match_provider(m)
+                if result[0] is not None:
+                    return result
+            return None, None
+        model_lower = resolved.lower()
         model_normalized = model_lower.replace("-", "_")
         model_prefix = model_lower.split("/", 1)[0] if "/" in model_lower else ""
         normalized_prefix = model_prefix.replace("-", "_")
