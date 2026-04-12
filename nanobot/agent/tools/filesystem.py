@@ -788,7 +788,7 @@ class EditFileTool(_FsTool):
             siblings = [f.name for f in parent.iterdir() if f.is_file()]
             close = difflib.get_close_matches(fp.name, siblings, n=3, cutoff=0.6)
             suggestions = [str(parent / c) for c in close]
-        parts = [f"Error: File not found: {path}"]
+        parts = [f"Error: File not found: {path}. Use write_file to create a new file."]
         if suggestions:
             parts.append("Did you mean: " + ", ".join(suggestions) + "?")
         return "\n".join(parts)

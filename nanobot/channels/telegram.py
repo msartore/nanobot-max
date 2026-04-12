@@ -480,7 +480,7 @@ class TelegramChannel(BaseChannel):
     async def _call_with_retry(self, fn, *args, **kwargs):
         """Call an async Telegram API function with retry on pool/network timeout and RetryAfter."""
         from telegram.error import RetryAfter
-        
+
         for attempt in range(1, _SEND_MAX_RETRIES + 1):
             try:
                 return await fn(*args, **kwargs)
@@ -538,6 +538,71 @@ class TelegramChannel(BaseChannel):
     def _is_not_modified_error(exc: Exception) -> bool:
         return isinstance(exc, BadRequest) and "message is not modified" in str(exc).lower()
 
+    @staticmethod
+    def _is_message_too_long_error(exc: Exception) -> bool:
+        return isinstance(exc, BadRequest) and "message_too_long" in str(exc).lower()
+
+    async def _try_edit_message(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        *,
+        parse_mode: str | None = None,
+    ) -> str:
+        """Attempt to edit a Telegram message.
+
+        Returns 'ok', 'not_modified', or 'too_long'. Re-raises on other errors.
+        """
+        try:
+            kwargs: dict = dict(chat_id=chat_id, message_id=message_id, text=text)
+            if parse_mode:
+                kwargs["parse_mode"] = parse_mode
+            await self._call_with_retry(self._app.bot.edit_message_text, **kwargs)
+            return "ok"
+        except Exception as e:
+            if self._is_not_modified_error(e):
+                return "not_modified"
+            if self._is_message_too_long_error(e):
+                return "too_long"
+            raise
+
+    async def _finalize_long_stream(self, chat_id: int, buf: "_StreamBuf") -> None:
+        """Finalize a stream buffer whose text exceeds Telegram's limit.
+
+        Edits the already-sent placeholder message with the first chunk,
+        then sends each additional chunk as a new message.
+        """
+        chunks = list(split_message(buf.text, TELEGRAM_MAX_MESSAGE_LEN))
+        if not chunks:
+            return
+
+        # Edit the existing streaming message with the first chunk.
+        first = chunks[0]
+        try:
+            html = _markdown_to_telegram_html(first)
+            await self._call_with_retry(
+                self._app.bot.edit_message_text,
+                chat_id=chat_id, message_id=buf.message_id,
+                text=html, parse_mode="HTML",
+            )
+        except Exception:
+            try:
+                await self._call_with_retry(
+                    self._app.bot.edit_message_text,
+                    chat_id=chat_id, message_id=buf.message_id,
+                    text=first,
+                )
+            except Exception as e:
+                logger.warning("Failed to edit first chunk of long stream for {}: {}", chat_id, e)
+
+        # Send overflow chunks as new messages (no reply threading needed).
+        for chunk in chunks[1:]:
+            try:
+                await self._send_text(chat_id, chunk, reply_params=None, thread_kwargs={})
+            except Exception as e:
+                logger.warning("Failed to send overflow chunk for {}: {}", chat_id, e)
+
     async def send_delta(self, chat_id: str, delta: str, metadata: dict[str, Any] | None = None) -> None:
         """Progressive message editing: send on first delta, edit on subsequent ones."""
         if not self._app:
@@ -558,37 +623,25 @@ class TelegramChannel(BaseChannel):
                     await self._remove_reaction(chat_id, int(reply_to_message_id))
                 except ValueError:
                     pass
-            chunks = split_message(buf.text, TELEGRAM_MAX_MESSAGE_LEN)
-            primary_text = chunks[0] if chunks else buf.text
+            edit_result: str | None = None
             try:
-                html = _markdown_to_telegram_html(primary_text)
-                await self._call_with_retry(
-                    self._app.bot.edit_message_text,
-                    chat_id=int_chat_id, message_id=buf.message_id,
-                    text=html, parse_mode="HTML",
+                html = _markdown_to_telegram_html(buf.text)
+                edit_result = await self._try_edit_message(
+                    int_chat_id, buf.message_id, html, parse_mode="HTML",
                 )
             except Exception as e:
-                if self._is_not_modified_error(e):
-                    logger.debug("Final stream edit already applied for {}", chat_id)
-                    self._stream_bufs.pop(chat_id, None)
-                    return
                 logger.debug("Final stream edit failed (HTML), trying plain: {}", e)
                 try:
-                    await self._call_with_retry(
-                        self._app.bot.edit_message_text,
-                        chat_id=int_chat_id, message_id=buf.message_id,
-                        text=primary_text,
-                    )
+                    edit_result = await self._try_edit_message(int_chat_id, buf.message_id, buf.text)
                 except Exception as e2:
-                    if self._is_not_modified_error(e2):
-                        logger.debug("Final stream plain edit already applied for {}", chat_id)
-                    else:
-                        logger.warning("Final stream edit failed: {}", e2)
-                        raise  # Let ChannelManager handle retry
-            # If final content exceeds Telegram limit, keep the first chunk in
-            # the edited stream message and send the rest as follow-up messages.
-            for extra_chunk in chunks[1:]:
-                await self._send_text(int_chat_id, extra_chunk)
+                    logger.warning("Final stream edit failed: {}", e2)
+                    raise  # Let ChannelManager handle retry
+
+            if edit_result == "not_modified":
+                logger.debug("Final stream edit already applied for {}", chat_id)
+            elif edit_result == "too_long":
+                logger.debug("Final stream too long for {}, splitting into chunks", chat_id)
+                await self._finalize_long_stream(int_chat_id, buf)
             self._stream_bufs.pop(chat_id, None)
             return
 
@@ -621,16 +674,10 @@ class TelegramChannel(BaseChannel):
                 raise  # Let ChannelManager handle retry
         elif (now - buf.last_edit) >= self.config.stream_edit_interval:
             try:
-                await self._call_with_retry(
-                    self._app.bot.edit_message_text,
-                    chat_id=int_chat_id, message_id=buf.message_id,
-                    text=buf.text,
-                )
-                buf.last_edit = now
-            except Exception as e:
-                if self._is_not_modified_error(e):
+                result = await self._try_edit_message(int_chat_id, buf.message_id, buf.text)
+                if result in ("ok", "not_modified", "too_long"):
                     buf.last_edit = now
-                    return
+            except Exception as e:
                 logger.warning("Stream edit failed: {}", e)
                 raise  # Let ChannelManager handle retry
 
@@ -689,13 +736,13 @@ class TelegramChannel(BaseChannel):
         text = getattr(reply, "text", None) or getattr(reply, "caption", None) or ""
         if len(text) > TELEGRAM_REPLY_CONTEXT_MAX_LEN:
             text = text[:TELEGRAM_REPLY_CONTEXT_MAX_LEN] + "..."
-            
+
         if not text:
             return None
-            
+
         bot_id, _ = await self._ensure_bot_identity()
         reply_user = getattr(reply, "from_user", None)
-        
+
         if bot_id and reply_user and getattr(reply_user, "id", None) == bot_id:
             return f"[Reply to bot: {text}]"
         elif reply_user and getattr(reply_user, "username", None):
@@ -840,7 +887,7 @@ class TelegramChannel(BaseChannel):
         message = update.message
         user = update.effective_user
         self._remember_thread_context(message)
-        
+
         # Strip @bot_username suffix if present
         content = message.text or ""
         if content.startswith("/") and "@" in content:
@@ -848,7 +895,7 @@ class TelegramChannel(BaseChannel):
             cmd_part = cmd_part.split("@")[0]
             content = f"{cmd_part} {rest[0]}" if rest else cmd_part
         content = self._normalize_telegram_command(content)
-            
+
         await self._handle_message(
             sender_id=self._sender_id(user),
             chat_id=str(message.chat_id),

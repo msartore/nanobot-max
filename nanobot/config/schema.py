@@ -73,10 +73,12 @@ class AgentDefaults(Base):
     temperature: float = 0.1
     max_tool_iterations: int = 200
     max_tool_result_chars: int = 16_000
+    max_completion_checks: int = 2
+    context_compact_threshold_tokens: int = 50_000
     provider_retry_mode: Literal["standard", "persistent"] = "standard"
     reasoning_effort: str | None = None  # low / medium / high / adaptive - enables LLM thinking mode
     timezone: str = "UTC"  # IANA timezone, e.g. "Asia/Shanghai", "America/New_York"
-    unified_session: bool = False  # Share one session across all channels (single-user multi-device)
+    unified_session: bool = False  # Route all channels into a single shared session
     disabled_skills: list[str] = Field(default_factory=list)  # Skill names to exclude from loading (e.g. ["summarize", "skill-creator"])
     session_ttl_minutes: int = Field(
         default=0,
@@ -160,7 +162,7 @@ class GatewayConfig(Base):
 class WebSearchConfig(Base):
     """Web search tool configuration."""
 
-    provider: str = "duckduckgo"  # brave, tavily, duckduckgo, searxng, jina, kagi
+    provider: str = "duckduckgo"  # brave, tavily, duckduckgo, searxng, jina
     api_key: str = ""
     base_url: str = ""  # SearXNG base URL
     max_results: int = 5
@@ -198,12 +200,21 @@ class MCPServerConfig(Base):
     tool_timeout: int = 30  # seconds before a tool call is cancelled
     enabled_tools: list[str] = Field(default_factory=lambda: ["*"])  # Only register these tools; accepts raw MCP names or wrapped mcp_<server>_<tool> names; ["*"] = all tools; [] = no tools
 
+class XSearchConfig(Base):
+    """Configuration for the native X (Twitter) search tool via xAI."""
+
+    enable: bool = False
+    api_key: str = ""  # xAI API key; falls back to XAI_API_KEY env var
+    model: str = "grok-3"
+
+
 class ToolsConfig(Base):
     """Tools configuration."""
 
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
-    restrict_to_workspace: bool = False  # restrict all tool access to workspace directory
+    xsearch: XSearchConfig = Field(default_factory=XSearchConfig)
+    restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
     ssrf_whitelist: list[str] = Field(default_factory=list)  # CIDR ranges to exempt from SSRF blocking (e.g. ["100.64.0.0/10"] for Tailscale)
 

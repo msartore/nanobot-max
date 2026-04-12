@@ -77,14 +77,14 @@ class TestAgentLoopTTLParam:
     """Test that AutoCompact receives and stores session_ttl_minutes."""
 
     def test_loop_stores_ttl(self, tmp_path):
-        """AutoCompact should store the TTL value."""
+        """Loop should store session_ttl_minutes."""
         loop = _make_loop(tmp_path, session_ttl_minutes=25)
-        assert loop.auto_compact._ttl == 25
+        assert loop.session_ttl_minutes == 25
 
     def test_loop_default_ttl_zero(self, tmp_path):
-        """AutoCompact default TTL should be 0 (disabled)."""
+        """Default session_ttl_minutes should be 0 (disabled)."""
         loop = _make_loop(tmp_path, session_ttl_minutes=0)
-        assert loop.auto_compact._ttl == 0
+        assert loop.session_ttl_minutes == 0
 
 
 class TestAutoCompact:

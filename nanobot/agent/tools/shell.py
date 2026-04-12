@@ -101,11 +101,8 @@ class ExecTool(Tool):
         return True
 
     async def execute(
-        self,
-        command: str,
-        working_dir: str | None = None,
-        timeout: int | None = None,
-        **kwargs: Any,
+        self, command: str, working_dir: str | None = None,
+        timeout: int | None = None, **kwargs: Any,
     ) -> str:
         cwd = working_dir or self.working_dir or os.getcwd()
 
@@ -193,17 +190,13 @@ class ExecTool(Tool):
 
     @staticmethod
     async def _spawn(
-        command: str,
-        cwd: str,
-        env: dict[str, str],
+        command: str, cwd: str, env: dict[str, str],
     ) -> asyncio.subprocess.Process:
         """Launch *command* in a platform-appropriate shell."""
         if _IS_WINDOWS:
             comspec = env.get("COMSPEC", os.environ.get("COMSPEC", "cmd.exe"))
             return await asyncio.create_subprocess_exec(
-                comspec,
-                "/c",
-                command,
+                comspec, "/c", command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
@@ -211,10 +204,7 @@ class ExecTool(Tool):
             )
         bash = shutil.which("bash") or "/bin/bash"
         return await asyncio.create_subprocess_exec(
-            bash,
-            "-l",
-            "-c",
-            command,
+            bash, "-l", "-c", command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
@@ -283,26 +273,19 @@ class ExecTool(Tool):
                 "ProgramFiles(x86)": os.environ.get("ProgramFiles(x86)", ""),
                 "ProgramW6432": os.environ.get("ProgramW6432", ""),
             }
-            for key in self.allowed_env_keys:
-                val = os.environ.get(key)
-                if val is not None:
-                    env[key] = val
-            if workspace:
-                env["WORKSPACE"] = workspace
-            return env
-        home = os.environ.get("HOME", "/tmp")
-        env = {
-            "HOME": home,
-            "LANG": os.environ.get("LANG", "C.UTF-8"),
-            "TERM": os.environ.get("TERM", "dumb"),
-        }
+        else:
+            home = os.environ.get("HOME", "/tmp")
+            env = {
+                "HOME": home,
+                "LANG": os.environ.get("LANG", "C.UTF-8"),
+                "TERM": os.environ.get("TERM", "dumb"),
+            }
         for key in self.allowed_env_keys:
             val = os.environ.get(key)
             if val is not None:
                 env[key] = val
         if workspace:
             env["WORKSPACE"] = workspace
-        return env
         return env
 
     def _guard_command(self, command: str, cwd: str) -> str | None:
@@ -319,7 +302,6 @@ class ExecTool(Tool):
                 return "Error: Command blocked by safety guard (not in allowlist)"
 
         from nanobot.security.network import contains_internal_url
-
         if contains_internal_url(cmd):
             return "Error: Command blocked by safety guard (internal/private URL detected)"
 
@@ -337,8 +319,7 @@ class ExecTool(Tool):
                     continue
 
                 media_path = get_media_dir().resolve()
-                if (
-                    p.is_absolute()
+                if (p.is_absolute()
                     and cwd_path not in p.parents
                     and p != cwd_path
                     and media_path not in p.parents
@@ -353,10 +334,6 @@ class ExecTool(Tool):
         # Windows: match drive-root paths like `C:\` as well as `C:\path\to\file`
         # NOTE: `*` is required so `C:\` (nothing after the slash) is still extracted.
         win_paths = re.findall(r"[A-Za-z]:\\[^\s\"'|><;]*", command)
-        posix_paths = re.findall(
-            r"(?:^|[\s|>'\"])(/[^\s\"'>;|<]+)", command
-        )  # POSIX: /absolute only
-        home_paths = re.findall(
-            r"(?:^|[\s|>'\"])(~[^\s\"'>;|<]*)", command
-        )  # POSIX/Windows home shortcut: ~
+        posix_paths = re.findall(r"(?:^|[\s|>'\"])(/[^\s\"'>;|<]+)", command) # POSIX: /absolute only
+        home_paths = re.findall(r"(?:^|[\s|>'\"])(~[^\s\"'>;|<]*)", command) # POSIX/Windows home shortcut: ~
         return win_paths + posix_paths + home_paths

@@ -46,11 +46,13 @@ class SafeFileHistory(FileHistory):
     def store_string(self, string: str) -> None:
         safe = string.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
         super().store_string(safe)
-from nanobot.cli.stream import StreamRenderer, ThinkingSpinner
-from nanobot.config.paths import get_workspace_path, is_default_workspace
-from nanobot.config.schema import Config
-from nanobot.utils.helpers import sync_workspace_templates
-from nanobot.utils.restart import (
+
+
+from nanobot.cli.stream import StreamRenderer, ThinkingSpinner  # noqa: E402
+from nanobot.config.paths import get_workspace_path, is_default_workspace  # noqa: E402
+from nanobot.config.schema import Config  # noqa: E402
+from nanobot.utils.helpers import sync_workspace_templates  # noqa: E402
+from nanobot.utils.restart import (  # noqa: E402
     consume_restart_notice_from_env,
     format_restart_completed_message,
     should_show_cli_restart_notice,
@@ -498,6 +500,7 @@ def _load_runtime_config(config: str | None = None, workspace: str | None = None
     _warn_deprecated_config_keys(config_path)
     if workspace:
         loaded.agents.defaults.workspace = workspace
+    _warn_workspace_outside_data_dir(loaded)
     return loaded
 
 
@@ -517,6 +520,28 @@ def _warn_deprecated_config_keys(config_path: Path | None) -> None:
             "[dim]Hint: `memoryWindow` in your config is no longer used "
             "and can be safely removed.[/dim]"
         )
+
+
+def _warn_workspace_outside_data_dir(config: "Config") -> None:
+    """Warn when the configured workspace is outside ~/.nanobot/.
+
+    In a typical Docker setup the volume is mounted as
+    ``~/.nanobot:/home/nanobot/.nanobot``.  If the workspace is configured
+    to something like ``~/workspace`` (missing the ``.nanobot`` prefix) it
+    will be ephemeral — data is lost on every container restart.
+    """
+    try:
+        workspace = Path(config.agents.defaults.workspace).expanduser().resolve()
+        data_dir = (Path.home() / ".nanobot").resolve()
+        if not (workspace == data_dir or data_dir in workspace.parents):
+            console.print(
+                f"[yellow]Warning: workspace '{workspace}' is outside ~/.nanobot/. "
+                "In Docker with volume mount '~/.nanobot:/home/nanobot/.nanobot', "
+                "data will not persist across container restarts. "
+                "Consider setting workspace to ~/.nanobot/workspace in your config.[/yellow]"
+            )
+    except Exception:
+        pass
 
 
 def _migrate_cron_store(config: "Config") -> None:
@@ -554,6 +579,7 @@ def serve(
         raise typer.Exit(1)
 
     from loguru import logger
+
     from nanobot.agent.loop import AgentLoop
     from nanobot.api.server import create_app
     from nanobot.bus.queue import MessageBus
@@ -585,12 +611,14 @@ def serve(
         provider_retry_mode=runtime_config.agents.defaults.provider_retry_mode,
         web_config=runtime_config.tools.web,
         exec_config=runtime_config.tools.exec,
+        xsearch_config=runtime_config.tools.xsearch,
         restrict_to_workspace=runtime_config.tools.restrict_to_workspace,
         session_manager=session_manager,
         mcp_servers=runtime_config.tools.mcp_servers,
         channels_config=runtime_config.channels,
         timezone=runtime_config.agents.defaults.timezone,
-        unified_session=runtime_config.agents.defaults.unified_session,
+        max_completion_checks=runtime_config.agents.defaults.max_completion_checks,
+        context_compact_threshold_tokens=runtime_config.agents.defaults.context_compact_threshold_tokens,
         disabled_skills=runtime_config.agents.defaults.disabled_skills,
         session_ttl_minutes=runtime_config.agents.defaults.session_ttl_minutes,
     )
@@ -678,13 +706,15 @@ def gateway(
         max_tool_result_chars=config.agents.defaults.max_tool_result_chars,
         provider_retry_mode=config.agents.defaults.provider_retry_mode,
         exec_config=config.tools.exec,
+        xsearch_config=config.tools.xsearch,
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
-        unified_session=config.agents.defaults.unified_session,
+        max_completion_checks=config.agents.defaults.max_completion_checks,
+        context_compact_threshold_tokens=config.agents.defaults.context_compact_threshold_tokens,
         disabled_skills=config.agents.defaults.disabled_skills,
         session_ttl_minutes=config.agents.defaults.session_ttl_minutes,
     )
@@ -733,9 +763,17 @@ def gateway(
             return response
 
         if job.payload.deliver and job.payload.to and response:
+            # Only suppress if the response is genuinely empty or signals no
+            # useful output — the user already opted in via deliver=True, so
+            # don't let the evaluator silently discard routine completions.
             should_notify = await evaluate_response(
                 response, reminder_note, provider, agent.model,
             )
+            if not should_notify:
+                logger.info(
+                    "Cron: job '{}' response suppressed by evaluator (deliver=True but response deemed routine)",
+                    job.name,
+                )
             if should_notify:
                 from nanobot.bus.events import OutboundMessage
                 await bus.publish_outbound(OutboundMessage(
@@ -913,12 +951,14 @@ def agent(
         max_tool_result_chars=config.agents.defaults.max_tool_result_chars,
         provider_retry_mode=config.agents.defaults.provider_retry_mode,
         exec_config=config.tools.exec,
+        xsearch_config=config.tools.xsearch,
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
-        unified_session=config.agents.defaults.unified_session,
+        max_completion_checks=config.agents.defaults.max_completion_checks,
+        context_compact_threshold_tokens=config.agents.defaults.context_compact_threshold_tokens,
         disabled_skills=config.agents.defaults.disabled_skills,
         session_ttl_minutes=config.agents.defaults.session_ttl_minutes,
     )
@@ -987,7 +1027,51 @@ def agent(
         if hasattr(signal, 'SIGPIPE'):
             signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
+        async def on_cron_job(job):
+            from nanobot.agent.tools.cron import CronTool
+            from nanobot.bus.events import OutboundMessage
+
+            if job.name == "dream":
+                try:
+                    await agent_loop.dream.run()
+                except Exception:
+                    logger.exception("Dream cron job failed")
+                return None
+
+            reminder_note = (
+                "[Scheduled Task] Timer finished.\n\n"
+                f"Task '{job.name}' has been triggered.\n"
+                f"Scheduled instruction: {job.payload.message}"
+            )
+
+            cron_tool = agent_loop.tools.get("cron")
+            cron_token = None
+            if isinstance(cron_tool, CronTool):
+                cron_token = cron_tool.set_cron_context(True)
+            try:
+                resp = await agent_loop.process_direct(
+                    reminder_note,
+                    session_key=f"cron:{job.id}",
+                    channel=job.payload.channel or cli_channel,
+                    chat_id=job.payload.to or cli_chat_id,
+                )
+            finally:
+                if isinstance(cron_tool, CronTool) and cron_token is not None:
+                    cron_tool.reset_cron_context(cron_token)
+
+            response = resp.content if resp else ""
+            if job.payload.deliver and response:
+                await bus.publish_outbound(OutboundMessage(
+                    channel=job.payload.channel or cli_channel,
+                    chat_id=job.payload.to or cli_chat_id,
+                    content=response,
+                ))
+            return response
+
+        cron.on_job = on_cron_job
+
         async def run_interactive():
+            await cron.start()
             bus_task = asyncio.create_task(agent_loop.run())
             turn_done = asyncio.Event()
             turn_done.set()
@@ -1092,6 +1176,7 @@ def agent(
                         console.print("\nGoodbye!")
                         break
             finally:
+                cron.stop()
                 agent_loop.stop()
                 outbound_task.cancel()
                 await asyncio.gather(bus_task, outbound_task, return_exceptions=True)
@@ -1125,7 +1210,7 @@ def channels_status(
 
     table = Table(title="Channel Status")
     table.add_column("Channel", style="cyan")
-    table.add_column("Enabled")
+    table.add_column("Enabled", style="green")
 
     for name, cls in sorted(discover_all().items()):
         section = getattr(config.channels, name, None)
@@ -1260,7 +1345,7 @@ def plugins_list():
     table = Table(title="Channel Plugins")
     table.add_column("Name", style="cyan")
     table.add_column("Source", style="magenta")
-    table.add_column("Enabled")
+    table.add_column("Enabled", style="green")
 
     for name in sorted(all_channels):
         cls = all_channels[name]

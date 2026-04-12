@@ -29,10 +29,10 @@ async def test_connect_mcp_retries_when_no_servers_connect(tmp_path, monkeypatch
     loop = _make_loop(tmp_path)
     attempts = 0
 
-    async def _fake_connect(_servers, _registry):
+    async def _fake_connect(_servers, _registry, _stack=None):
         nonlocal attempts
         attempts += 1
-        return {}
+        raise RuntimeError("simulated connection failure")
 
     monkeypatch.setattr("nanobot.agent.tools.mcp.connect_mcp_servers", _fake_connect)
 
@@ -41,4 +41,4 @@ async def test_connect_mcp_retries_when_no_servers_connect(tmp_path, monkeypatch
 
     assert attempts == 2
     assert loop._mcp_connected is False
-    assert loop._mcp_stacks == {}
+    assert loop._mcp_stack is None

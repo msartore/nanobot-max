@@ -78,12 +78,12 @@ class Nanobot:
             provider_retry_mode=defaults.provider_retry_mode,
             web_config=config.tools.web,
             exec_config=config.tools.exec,
+            xsearch_config=config.tools.xsearch,
             restrict_to_workspace=config.tools.restrict_to_workspace,
             mcp_servers=config.tools.mcp_servers,
             timezone=defaults.timezone,
-            unified_session=defaults.unified_session,
-            disabled_skills=defaults.disabled_skills,
-            session_ttl_minutes=defaults.session_ttl_minutes,
+            max_completion_checks=defaults.max_completion_checks,
+            context_compact_threshold_tokens=defaults.context_compact_threshold_tokens,
         )
         return cls(loop)
 

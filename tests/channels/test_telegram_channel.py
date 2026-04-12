@@ -391,13 +391,18 @@ async def test_send_delta_stream_end_treats_not_modified_as_success() -> None:
 async def test_send_delta_stream_end_splits_oversized_reply() -> None:
     """Final streamed reply exceeding Telegram limit is split into chunks."""
     from nanobot.channels.telegram import TELEGRAM_MAX_MESSAGE_LEN
+    from telegram.error import BadRequest
 
     channel = TelegramChannel(
         TelegramConfig(enabled=True, token="123:abc", allow_from=["*"]),
         MessageBus(),
     )
     channel._app = _FakeApp(lambda: None)
-    channel._app.bot.edit_message_text = AsyncMock()
+
+    async def raise_too_long(*args, **kwargs):
+        raise BadRequest("M message is message_too_long")
+
+    channel._app.bot.edit_message_text = AsyncMock(side_effect=raise_too_long)
     channel._app.bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=99))
 
     oversized = "x" * (TELEGRAM_MAX_MESSAGE_LEN + 500)
@@ -405,11 +410,7 @@ async def test_send_delta_stream_end_splits_oversized_reply() -> None:
 
     await channel.send_delta("123", "", {"_stream_end": True})
 
-    channel._app.bot.edit_message_text.assert_called_once()
-    edit_text = channel._app.bot.edit_message_text.call_args.kwargs.get("text", "")
-    assert len(edit_text) <= TELEGRAM_MAX_MESSAGE_LEN
-
-    channel._app.bot.send_message.assert_called_once()
+    assert channel._app.bot.send_message.called
     assert "123" not in channel._stream_bufs
 
 
@@ -449,6 +450,26 @@ async def test_send_delta_incremental_edit_treats_not_modified_as_success() -> N
 
     await channel.send_delta("123", "", {"_stream_delta": True, "_stream_id": "s:0"})
 
+    assert channel._stream_bufs["123"].last_edit > 0.0
+
+
+@pytest.mark.asyncio
+async def test_send_delta_incremental_edit_skips_silently_when_too_long() -> None:
+    """Mid-stream edits that hit Message_too_long must not raise (no retry loop)."""
+    from telegram.error import BadRequest
+
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["*"]),
+        MessageBus(),
+    )
+    channel._app = _FakeApp(lambda: None)
+    channel._stream_bufs["123"] = _StreamBuf(text="x" * 5000, message_id=7, last_edit=0.0, stream_id="s:0")
+    channel._app.bot.edit_message_text = AsyncMock(side_effect=BadRequest("message is message_too_long"))
+
+    # Must not raise — the final _stream_end will handle splitting
+    await channel.send_delta("123", "", {"_stream_delta": True, "_stream_id": "s:0"})
+
+    # last_edit is updated so the next tick doesn't immediately retry
     assert channel._stream_bufs["123"].last_edit > 0.0
 
 

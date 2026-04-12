@@ -322,8 +322,13 @@ class AnthropicProvider(LLMProvider):
         if isinstance(system, str) and system:
             system = [{"type": "text", "text": system, "cache_control": marker}]
         elif isinstance(system, list) and system:
-            system = list(system)
-            system[-1] = {**system[-1], "cache_control": marker}
+            # Mark every text block so each acts as a cache breakpoint.
+            # The stable prefix (first block) is cached across turns; the dynamic
+            # suffix (last block, e.g. context summary) is cached within a turn.
+            system = [
+                {**block, "cache_control": marker} if block.get("type") == "text" else block
+                for block in system
+            ]
 
         new_msgs = list(messages)
         if len(new_msgs) >= 3:

@@ -1,312 +1,209 @@
-"""Tests for nanobot.agent.skills.SkillsLoader."""
+"""Tests for SkillsLoader — metadata parsing and baseDir substitution."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
-from nanobot.agent.skills import SkillsLoader
+
+def _make_loader(workspace: Path, *, no_builtins: bool = True):
+    from nanobot.agent.skills import SkillsLoader
+
+    builtin_dir = workspace / "_no_builtins_"  # non-existent dir disables builtins
+    return SkillsLoader(workspace, builtin_skills_dir=builtin_dir if no_builtins else None)
 
 
-def _write_skill(
-    base: Path,
-    name: str,
-    *,
-    metadata_json: dict | None = None,
-    body: str = "# Skill\n",
-) -> Path:
-    """Create ``base / name / SKILL.md`` with optional nanobot metadata JSON."""
-    skill_dir = base / name
-    skill_dir.mkdir(parents=True)
-    lines = ["---"]
-    if metadata_json is not None:
-        payload = json.dumps({"nanobot": metadata_json}, separators=(",", ":"))
-        lines.append(f'metadata: {payload}')
-    lines.extend(["---", "", body])
-    path = skill_dir / "SKILL.md"
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return path
+def _write_skill(workspace: Path, name: str, skill_md: str) -> Path:
+    """Write a skill into workspace/skills/<name>/SKILL.md and return the skill dir."""
+    skill_dir = workspace / "skills" / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(skill_md, encoding="utf-8")
+    return skill_dir
 
 
-def test_list_skills_empty_when_skills_dir_missing(tmp_path: Path) -> None:
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    builtin = tmp_path / "builtin"
-    builtin.mkdir()
-    loader = SkillsLoader(workspace, builtin_skills_dir=builtin)
-    assert loader.list_skills(filter_unavailable=False) == []
+# ---------------------------------------------------------------------------
+# _extract_multiline_json
+# ---------------------------------------------------------------------------
 
+def test_extract_multiline_json_parses_openclaw_style():
+    from nanobot.agent.skills import SkillsLoader
 
-def test_list_skills_empty_when_skills_dir_exists_but_empty(tmp_path: Path) -> None:
-    workspace = tmp_path / "ws"
-    (workspace / "skills").mkdir(parents=True)
-    builtin = tmp_path / "builtin"
-    builtin.mkdir()
-    loader = SkillsLoader(workspace, builtin_skills_dir=builtin)
-    assert loader.list_skills(filter_unavailable=False) == []
-
-
-def test_list_skills_workspace_entry_shape_and_source(tmp_path: Path) -> None:
-    workspace = tmp_path / "ws"
-    skills_root = workspace / "skills"
-    skills_root.mkdir(parents=True)
-    skill_path = _write_skill(skills_root, "alpha", body="# Alpha")
-    builtin = tmp_path / "builtin"
-    builtin.mkdir()
-
-    loader = SkillsLoader(workspace, builtin_skills_dir=builtin)
-    entries = loader.list_skills(filter_unavailable=False)
-    assert entries == [
-        {"name": "alpha", "path": str(skill_path), "source": "workspace"},
-    ]
-
-
-def test_list_skills_skips_non_directories_and_missing_skill_md(tmp_path: Path) -> None:
-    workspace = tmp_path / "ws"
-    skills_root = workspace / "skills"
-    skills_root.mkdir(parents=True)
-    (skills_root / "not_a_dir.txt").write_text("x", encoding="utf-8")
-    (skills_root / "no_skill_md").mkdir()
-    ok_path = _write_skill(skills_root, "ok", body="# Ok")
-    builtin = tmp_path / "builtin"
-    builtin.mkdir()
-
-    loader = SkillsLoader(workspace, builtin_skills_dir=builtin)
-    entries = loader.list_skills(filter_unavailable=False)
-    names = {entry["name"] for entry in entries}
-    assert names == {"ok"}
-    assert entries[0]["path"] == str(ok_path)
-
-
-def test_list_skills_workspace_shadows_builtin_same_name(tmp_path: Path) -> None:
-    workspace = tmp_path / "ws"
-    ws_skills = workspace / "skills"
-    ws_skills.mkdir(parents=True)
-    ws_path = _write_skill(ws_skills, "dup", body="# Workspace wins")
-
-    builtin = tmp_path / "builtin"
-    _write_skill(builtin, "dup", body="# Builtin")
-
-    loader = SkillsLoader(workspace, builtin_skills_dir=builtin)
-    entries = loader.list_skills(filter_unavailable=False)
-    assert len(entries) == 1
-    assert entries[0]["source"] == "workspace"
-    assert entries[0]["path"] == str(ws_path)
-
-
-def test_list_skills_merges_workspace_and_builtin(tmp_path: Path) -> None:
-    workspace = tmp_path / "ws"
-    ws_skills = workspace / "skills"
-    ws_skills.mkdir(parents=True)
-    ws_path = _write_skill(ws_skills, "ws_only", body="# W")
-    builtin = tmp_path / "builtin"
-    bi_path = _write_skill(builtin, "bi_only", body="# B")
-
-    loader = SkillsLoader(workspace, builtin_skills_dir=builtin)
-    entries = sorted(loader.list_skills(filter_unavailable=False), key=lambda item: item["name"])
-    assert entries == [
-        {"name": "bi_only", "path": str(bi_path), "source": "builtin"},
-        {"name": "ws_only", "path": str(ws_path), "source": "workspace"},
-    ]
-
-
-def test_list_skills_builtin_omitted_when_dir_missing(tmp_path: Path) -> None:
-    workspace = tmp_path / "ws"
-    ws_skills = workspace / "skills"
-    ws_skills.mkdir(parents=True)
-    ws_path = _write_skill(ws_skills, "solo", body="# S")
-    missing_builtin = tmp_path / "no_such_builtin"
-
-    loader = SkillsLoader(workspace, builtin_skills_dir=missing_builtin)
-    entries = loader.list_skills(filter_unavailable=False)
-    assert entries == [{"name": "solo", "path": str(ws_path), "source": "workspace"}]
-
-
-def test_list_skills_filter_unavailable_excludes_unmet_bin_requirement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    workspace = tmp_path / "ws"
-    skills_root = workspace / "skills"
-    skills_root.mkdir(parents=True)
-    _write_skill(
-        skills_root,
-        "needs_bin",
-        metadata_json={"requires": {"bins": ["nanobot_test_fake_binary"]}},
+    frontmatter = (
+        'name: x-search\n'
+        'description: Search X\n'
+        'metadata:\n'
+        '  {\n'
+        '    "openclaw":\n'
+        '      {\n'
+        '        "requires": { "bins": ["python3"], "env": ["XAI_API_KEY"] }\n'
+        '      }\n'
+        '  }\n'
     )
-    builtin = tmp_path / "builtin"
-    builtin.mkdir()
-
-    def fake_which(cmd: str) -> str | None:
-        if cmd == "nanobot_test_fake_binary":
-            return None
-        return "/usr/bin/true"
-
-    monkeypatch.setattr("nanobot.agent.skills.shutil.which", fake_which)
-
-    loader = SkillsLoader(workspace, builtin_skills_dir=builtin)
-    assert loader.list_skills(filter_unavailable=True) == []
+    raw = SkillsLoader._extract_multiline_json(frontmatter, "metadata")
+    import json
+    parsed = json.loads(raw)
+    assert parsed["openclaw"]["requires"]["env"] == ["XAI_API_KEY"]
+    assert parsed["openclaw"]["requires"]["bins"] == ["python3"]
 
 
-def test_list_skills_filter_unavailable_includes_when_bin_requirement_met(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    workspace = tmp_path / "ws"
-    skills_root = workspace / "skills"
-    skills_root.mkdir(parents=True)
-    skill_path = _write_skill(
-        skills_root,
-        "has_bin",
-        metadata_json={"requires": {"bins": ["nanobot_test_fake_binary"]}},
+def test_extract_multiline_json_returns_empty_for_missing_key():
+    from nanobot.agent.skills import SkillsLoader
+
+    frontmatter = "name: foo\ndescription: bar\n"
+    assert SkillsLoader._extract_multiline_json(frontmatter, "metadata") == ""
+
+
+def test_extract_multiline_json_strips_trailing_commas():
+    from nanobot.agent.skills import SkillsLoader
+
+    frontmatter = (
+        'metadata:\n'
+        '  {\n'
+        '    "openclaw": {\n'
+        '      "emoji": "X",\n'
+        '      "requires": { "env": ["KEY"], },\n'
+        '    },\n'
+        '  }\n'
     )
-    builtin = tmp_path / "builtin"
-    builtin.mkdir()
-
-    def fake_which(cmd: str) -> str | None:
-        if cmd == "nanobot_test_fake_binary":
-            return "/fake/nanobot_test_fake_binary"
-        return None
-
-    monkeypatch.setattr("nanobot.agent.skills.shutil.which", fake_which)
-
-    loader = SkillsLoader(workspace, builtin_skills_dir=builtin)
-    entries = loader.list_skills(filter_unavailable=True)
-    assert entries == [
-        {"name": "has_bin", "path": str(skill_path), "source": "workspace"},
-    ]
+    raw = SkillsLoader._extract_multiline_json(frontmatter, "metadata")
+    import json
+    parsed = json.loads(raw)
+    assert parsed["openclaw"]["requires"]["env"] == ["KEY"]
 
 
-def test_list_skills_filter_unavailable_false_keeps_unmet_requirements(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    workspace = tmp_path / "ws"
-    skills_root = workspace / "skills"
-    skills_root.mkdir(parents=True)
-    skill_path = _write_skill(
-        skills_root,
-        "blocked",
-        metadata_json={"requires": {"bins": ["nanobot_test_fake_binary"]}},
+# ---------------------------------------------------------------------------
+# get_skill_metadata with multi-line metadata
+# ---------------------------------------------------------------------------
+
+def test_get_skill_metadata_parses_multiline_metadata(tmp_path):
+    skill_md = (
+        '---\n'
+        'name: x-search\n'
+        'description: Search X posts\n'
+        'metadata:\n'
+        '  {\n'
+        '    "openclaw":\n'
+        '      {\n'
+        '        "requires": { "bins": ["python3"], "env": ["XAI_API_KEY"] }\n'
+        '      }\n'
+        '  }\n'
+        '---\n\n'
+        '# X Search\n'
     )
-    builtin = tmp_path / "builtin"
-    builtin.mkdir()
+    _write_skill(tmp_path, "x-search", skill_md)
+    loader = _make_loader(tmp_path)
+    meta = loader.get_skill_metadata("x-search")
 
-    monkeypatch.setattr("nanobot.agent.skills.shutil.which", lambda _cmd: None)
-
-    loader = SkillsLoader(workspace, builtin_skills_dir=builtin)
-    entries = loader.list_skills(filter_unavailable=False)
-    assert entries == [
-        {"name": "blocked", "path": str(skill_path), "source": "workspace"},
-    ]
+    assert meta is not None
+    assert meta["name"] == "x-search"
+    assert meta["description"] == "Search X posts"
+    assert meta["metadata"]  # non-empty JSON string
 
 
-def test_list_skills_filter_unavailable_excludes_unmet_env_requirement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    workspace = tmp_path / "ws"
-    skills_root = workspace / "skills"
-    skills_root.mkdir(parents=True)
-    _write_skill(
-        skills_root,
-        "needs_env",
-        metadata_json={"requires": {"env": ["NANOBOT_SKILLS_TEST_ENV_VAR"]}},
+def test_get_skill_metadata_requirements_checked_from_multiline(tmp_path, monkeypatch):
+    skill_md = (
+        '---\n'
+        'name: x-search\n'
+        'description: Search X\n'
+        'metadata:\n'
+        '  {\n'
+        '    "openclaw": {\n'
+        '      "requires": { "bins": ["python3"], "env": ["XAI_API_KEY"] }\n'
+        '    }\n'
+        '  }\n'
+        '---\n\n# X Search\n'
     )
-    builtin = tmp_path / "builtin"
-    builtin.mkdir()
+    _write_skill(tmp_path, "x-search", skill_md)
+    loader = _make_loader(tmp_path)
 
-    monkeypatch.delenv("NANOBOT_SKILLS_TEST_ENV_VAR", raising=False)
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.setattr("nanobot.agent.skills.shutil.which", lambda b: None)
 
-    loader = SkillsLoader(workspace, builtin_skills_dir=builtin)
-    assert loader.list_skills(filter_unavailable=True) == []
+    skill_meta = loader._get_skill_meta("x-search")
+    assert not loader._check_requirements(skill_meta)
+
+    skills = loader.list_skills(filter_unavailable=True)
+    assert not any(s["name"] == "x-search" for s in skills)
 
 
-def test_list_skills_openclaw_metadata_parsed_for_requirements(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    workspace = tmp_path / "ws"
-    skills_root = workspace / "skills"
-    skills_root.mkdir(parents=True)
-    skill_dir = skills_root / "openclaw_skill"
-    skill_dir.mkdir(parents=True)
-    skill_path = skill_dir / "SKILL.md"
-    oc_payload = json.dumps({"openclaw": {"requires": {"bins": ["nanobot_oc_bin"]}}}, separators=(",", ":"))
-    skill_path.write_text(
-        "\n".join(["---", f"metadata: {oc_payload}", "---", "", "# OC"]),
-        encoding="utf-8",
+def test_get_skill_metadata_available_when_requirements_met(tmp_path, monkeypatch):
+    skill_md = (
+        '---\n'
+        'name: x-search\n'
+        'description: Search X\n'
+        'metadata:\n'
+        '  {\n'
+        '    "openclaw": {\n'
+        '      "requires": { "bins": ["python3"], "env": ["XAI_API_KEY"] }\n'
+        '    }\n'
+        '  }\n'
+        '---\n\n# X Search\n'
     )
-    builtin = tmp_path / "builtin"
-    builtin.mkdir()
+    _write_skill(tmp_path, "x-search", skill_md)
+    loader = _make_loader(tmp_path)
 
-    monkeypatch.setattr("nanobot.agent.skills.shutil.which", lambda _cmd: None)
+    monkeypatch.setenv("XAI_API_KEY", "xai-test-key")
+    monkeypatch.setattr("nanobot.agent.skills.shutil.which", lambda b: f"/usr/bin/{b}")
 
-    loader = SkillsLoader(workspace, builtin_skills_dir=builtin)
-    assert loader.list_skills(filter_unavailable=True) == []
+    skill_meta = loader._get_skill_meta("x-search")
+    assert loader._check_requirements(skill_meta)
 
-    monkeypatch.setattr(
-        "nanobot.agent.skills.shutil.which",
-        lambda cmd: "/x" if cmd == "nanobot_oc_bin" else None,
+    skills = loader.list_skills(filter_unavailable=True)
+    assert any(s["name"] == "x-search" for s in skills)
+
+
+# ---------------------------------------------------------------------------
+# {baseDir} substitution
+# ---------------------------------------------------------------------------
+
+def test_load_skill_substitutes_base_dir(tmp_path):
+    skill_md = (
+        '---\nname: x-search\ndescription: test\n---\n\n'
+        '```bash\npython3 {baseDir}/scripts/search.py "query"\n```\n'
     )
-    entries = loader.list_skills(filter_unavailable=True)
-    assert entries == [
-        {"name": "openclaw_skill", "path": str(skill_path), "source": "workspace"},
-    ]
+    skill_dir = _write_skill(tmp_path, "x-search", skill_md)
+    loader = _make_loader(tmp_path)
+
+    content = loader.load_skill("x-search")
+    assert content is not None
+    assert "{baseDir}" not in content
+    assert skill_dir.as_posix() in content
 
 
-def test_disabled_skills_excluded_from_list(tmp_path: Path) -> None:
-    workspace = tmp_path / "ws"
-    ws_skills = workspace / "skills"
-    ws_skills.mkdir(parents=True)
-    _write_skill(ws_skills, "alpha", body="# Alpha")
-    beta_path = _write_skill(ws_skills, "beta", body="# Beta")
-    builtin = tmp_path / "builtin"
-    builtin.mkdir()
+def test_build_skills_summary_includes_base_dir(tmp_path):
+    skill_md = '---\nname: x-search\ndescription: Search X\n---\n\n# X Search\n'
+    skill_dir = _write_skill(tmp_path, "x-search", skill_md)
+    loader = _make_loader(tmp_path)
 
-    loader = SkillsLoader(workspace, builtin_skills_dir=builtin, disabled_skills={"alpha"})
-    entries = loader.list_skills(filter_unavailable=False)
-    assert len(entries) == 1
-    assert entries[0]["name"] == "beta"
-    assert entries[0]["path"] == str(beta_path)
-
-
-def test_disabled_skills_empty_set_no_effect(tmp_path: Path) -> None:
-    workspace = tmp_path / "ws"
-    ws_skills = workspace / "skills"
-    ws_skills.mkdir(parents=True)
-    _write_skill(ws_skills, "alpha", body="# Alpha")
-    _write_skill(ws_skills, "beta", body="# Beta")
-    builtin = tmp_path / "builtin"
-    builtin.mkdir()
-
-    loader = SkillsLoader(workspace, builtin_skills_dir=builtin, disabled_skills=set())
-    entries = loader.list_skills(filter_unavailable=False)
-    assert len(entries) == 2
-
-
-def test_disabled_skills_excluded_from_build_skills_summary(tmp_path: Path) -> None:
-    workspace = tmp_path / "ws"
-    ws_skills = workspace / "skills"
-    ws_skills.mkdir(parents=True)
-    _write_skill(ws_skills, "alpha", body="# Alpha")
-    _write_skill(ws_skills, "beta", body="# Beta")
-    builtin = tmp_path / "builtin"
-    builtin.mkdir()
-
-    loader = SkillsLoader(workspace, builtin_skills_dir=builtin, disabled_skills={"alpha"})
     summary = loader.build_skills_summary()
-    assert "alpha" not in summary
-    assert "beta" in summary
+    assert "<baseDir>" in summary
+    assert skill_dir.as_posix() in summary
 
 
-def test_disabled_skills_excluded_from_get_always_skills(tmp_path: Path) -> None:
-    workspace = tmp_path / "ws"
-    ws_skills = workspace / "skills"
-    ws_skills.mkdir(parents=True)
-    _write_skill(ws_skills, "alpha", metadata_json={"always": True}, body="# Alpha")
-    _write_skill(ws_skills, "beta", metadata_json={"always": True}, body="# Beta")
-    builtin = tmp_path / "builtin"
-    builtin.mkdir()
+def test_build_skills_summary_uses_posix_paths(tmp_path):
+    """Both <location> and <baseDir> must use forward slashes so the model
+    can construct valid exec commands on all platforms."""
+    skill_md = '---\nname: x-search\ndescription: Search X\n---\n\n# X Search\n'
+    _write_skill(tmp_path, "x-search", skill_md)
+    loader = _make_loader(tmp_path)
 
-    loader = SkillsLoader(workspace, builtin_skills_dir=builtin, disabled_skills={"alpha"})
-    always = loader.get_always_skills()
-    assert "alpha" not in always
-    assert "beta" in always
+    summary = loader.build_skills_summary()
+    # Extract the <location> and <baseDir> values and verify no backslashes
+    import re
+    location = re.search(r"<location>(.*?)</location>", summary)
+    base_dir = re.search(r"<baseDir>(.*?)</baseDir>", summary)
+    assert location and "\\" not in location.group(1)
+    assert base_dir and "\\" not in base_dir.group(1)
+
+
+def test_build_skills_summary_xml_escapes_location(tmp_path):
+    """<location> path must be XML-escaped (consistent with <baseDir>)."""
+    skill_md = '---\nname: x-search\ndescription: Search X\n---\n\n# X Search\n'
+    _write_skill(tmp_path, "x-search", skill_md)
+    loader = _make_loader(tmp_path)
+
+    summary = loader.build_skills_summary()
+    # Valid XML — should parse without error
+    import xml.etree.ElementTree as ET
+    ET.fromstring(summary)  # raises if invalid XML

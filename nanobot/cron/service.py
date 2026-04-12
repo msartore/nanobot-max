@@ -12,7 +12,14 @@ from typing import Any, Callable, Coroutine, Literal
 from filelock import FileLock
 from loguru import logger
 
-from nanobot.cron.types import CronJob, CronJobState, CronPayload, CronRunRecord, CronSchedule, CronStore
+from nanobot.cron.types import (
+    CronJob,
+    CronJobState,
+    CronPayload,
+    CronRunRecord,
+    CronSchedule,
+    CronStore,
+)
 
 
 def _now_ms() -> int:
@@ -89,6 +96,7 @@ class CronService:
         if self.store_path.exists():
             try:
                 data = json.loads(self.store_path.read_text(encoding="utf-8"))
+                self._last_mtime = self.store_path.stat().st_mtime  # prevent spurious "modified externally" on next call
                 jobs = []
                 version = data.get("version", 1)
                 for j in data.get("jobs", []):
@@ -115,6 +123,7 @@ class CronService:
                             last_run_at_ms=j.get("state", {}).get("lastRunAtMs"),
                             last_status=j.get("state", {}).get("lastStatus"),
                             last_error=j.get("state", {}).get("lastError"),
+                            retry_count=j.get("state", {}).get("retryCount", 0),
                             run_history=[
                                 CronRunRecord(
                                     run_at_ms=r["runAtMs"],
@@ -216,6 +225,7 @@ class CronService:
                         "lastRunAtMs": j.state.last_run_at_ms,
                         "lastStatus": j.state.last_status,
                         "lastError": j.state.last_error,
+                        "retryCount": j.state.retry_count,
                         "runHistory": [
                             {
                                 "runAtMs": r.run_at_ms,
@@ -253,13 +263,22 @@ class CronService:
             self._timer_task = None
 
     def _recompute_next_runs(self) -> None:
-        """Recompute next run times for all enabled jobs."""
+        """Recompute next run times for all enabled jobs, detecting missed runs."""
         if not self._store:
             return
         now = _now_ms()
         for job in self._store.jobs:
-            if job.enabled:
-                job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
+            if not job.enabled:
+                continue
+            if job.schedule.kind == "every" and job.schedule.every_ms and job.state.last_run_at_ms:
+                elapsed = now - job.state.last_run_at_ms
+                intervals = elapsed // job.schedule.every_ms
+                if intervals > 1:
+                    logger.warning(
+                        "Cron: job '{}' missed {} run(s) during downtime",
+                        job.name, intervals - 1,
+                    )
+            job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
 
     def _get_next_wake_ms(self) -> int | None:
         """Get the earliest next run time across all jobs."""
@@ -271,7 +290,7 @@ class CronService:
 
     def _arm_timer(self) -> None:
         """Schedule the next timer tick."""
-        if self._timer_task:
+        if self._timer_task and not self._timer_task.done():
             self._timer_task.cancel()
 
         if not self._running:
@@ -293,6 +312,8 @@ class CronService:
 
     async def _on_timer(self) -> None:
         """Handle timer tick - run due jobs."""
+        # Load store first (picks up external changes), then lock it to prevent
+        # concurrent reloads from list_jobs() during on_job callbacks (#2826).
         self._load_store()
         if not self._store:
             self._arm_timer()
@@ -309,15 +330,19 @@ class CronService:
             for job in due_jobs:
                 await self._execute_job(job)
 
-            self._save_store()
+        except Exception as e:
+            logger.error("Cron: timer tick failed: {}", e)
         finally:
             self._timer_active = False
-        self._arm_timer()
+            self._save_store()
+            self._arm_timer()
 
     async def _execute_job(self, job: CronJob) -> None:
         """Execute a single job."""
         start_ms = _now_ms()
         logger.info("Cron: executing job '{}' ({})", job.name, job.id)
+
+        scheduled_time = job.state.next_run_at_ms
 
         try:
             if self.on_job:
@@ -325,12 +350,14 @@ class CronService:
 
             job.state.last_status = "ok"
             job.state.last_error = None
+            job.state.retry_count = 0
             logger.info("Cron: job '{}' completed", job.name)
 
         except Exception as e:
             job.state.last_status = "error"
             job.state.last_error = str(e)
-            logger.error("Cron: job '{}' failed: {}", job.name, e)
+            job.state.retry_count = (job.state.retry_count or 0) + 1
+            logger.error("Cron: job '{}' failed (attempt {}): {}", job.name, job.state.retry_count, e)
 
         end_ms = _now_ms()
         job.state.last_run_at_ms = start_ms
@@ -352,8 +379,24 @@ class CronService:
                 job.enabled = False
                 job.state.next_run_at_ms = None
         else:
-            # Compute next run
-            job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
+            if job.state.last_status == "error" and job.state.retry_count:
+                # Reduced minimum: 30s, 60s, 120s, 240s, 480s, 600s cap (was 120s..3600s)
+                backoff_s = min(2 ** job.state.retry_count * 30, 600)
+                job.state.next_run_at_ms = _now_ms() + backoff_s * 1000
+                logger.info(
+                    "Cron: job '{}' retrying in {}s (attempt {})",
+                    job.name, backoff_s, job.state.retry_count,
+                )
+            else:
+                # "every" jobs must advance from NOW, not from scheduled_time.
+                # Using scheduled_time when execution was slow puts next_run in
+                # the past, causing an immediate re-run loop on the next tick.
+                # "cron" and "at" jobs advance from scheduled_time to stay
+                # aligned with their expression.
+                if job.schedule.kind == "every":
+                    job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
+                else:
+                    job.state.next_run_at_ms = _compute_next_run(job.schedule, scheduled_time)
 
     def _append_action(self, action: Literal["add", "del", "update"], params: dict):
         self.store_path.parent.mkdir(parents=True, exist_ok=True)

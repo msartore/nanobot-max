@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field
-import inspect
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
 from nanobot.agent.hook import AgentHook, AgentHookContext
-from nanobot.utils.prompt_templates import render_template
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.providers.base import LLMProvider, ToolCallRequest
 from nanobot.utils.helpers import (
@@ -22,32 +21,28 @@ from nanobot.utils.helpers import (
     maybe_persist_tool_result,
     truncate_text,
 )
+from nanobot.utils.prompt_templates import render_template
 from nanobot.utils.runtime import (
     EMPTY_FINAL_RESPONSE_MESSAGE,
+    build_completion_check_message,
     build_finalization_retry_message,
-    build_length_recovery_message,
     ensure_nonempty_tool_result,
     is_blank_text,
+    is_completion_confirmed,
     repeated_external_lookup_error,
 )
 
 _DEFAULT_ERROR_MESSAGE = "Sorry, I encountered an error calling the AI model."
-_PERSISTED_MODEL_ERROR_PLACEHOLDER = "[Assistant reply unavailable due to model error.]"
 _MAX_EMPTY_RETRIES = 2
 _MAX_LENGTH_RECOVERIES = 3
-_MAX_INJECTIONS_PER_TURN = 3
-_MAX_INJECTION_CYCLES = 5
 _SNIP_SAFETY_BUFFER = 1024
 _MICROCOMPACT_KEEP_RECENT = 10
 _MICROCOMPACT_MIN_CHARS = 500
 _COMPACTABLE_TOOLS = frozenset({
     "read_file", "exec", "grep", "glob",
-    "web_search", "web_fetch", "list_dir",
+    "web_search", "web_fetch", "htmlunit_fetch", "list_dir",
 })
 _BACKFILL_CONTENT = "[Tool result unavailable — call was interrupted or lost]"
-
-
-
 @dataclass(slots=True)
 class AgentRunSpec:
     """Configuration for a single agent execution."""
@@ -69,10 +64,11 @@ class AgentRunSpec:
     session_key: str | None = None
     context_window_tokens: int | None = None
     context_block_limit: int | None = None
+    context_compact_threshold_tokens: int | None = None
     provider_retry_mode: str = "standard"
     progress_callback: Any | None = None
     checkpoint_callback: Any | None = None
-    injection_callback: Any | None = None
+    max_completion_checks: int = 0
 
 
 @dataclass(slots=True)
@@ -86,7 +82,6 @@ class AgentRunResult:
     stop_reason: str = "completed"
     error: str | None = None
     tool_events: list[dict[str, str]] = field(default_factory=list)
-    had_injections: bool = False
 
 
 class AgentRunner:
@@ -95,134 +90,45 @@ class AgentRunner:
     def __init__(self, provider: LLMProvider):
         self.provider = provider
 
-    @staticmethod
-    def _merge_message_content(left: Any, right: Any) -> str | list[dict[str, Any]]:
-        if isinstance(left, str) and isinstance(right, str):
-            return f"{left}\n\n{right}" if left else right
-
-        def _to_blocks(value: Any) -> list[dict[str, Any]]:
-            if isinstance(value, list):
-                return [
-                    item if isinstance(item, dict) else {"type": "text", "text": str(item)}
-                    for item in value
-                ]
-            if value is None:
-                return []
-            return [{"type": "text", "text": str(value)}]
-
-        return _to_blocks(left) + _to_blocks(right)
-
-    @classmethod
-    def _append_injected_messages(
-        cls,
-        messages: list[dict[str, Any]],
-        injections: list[dict[str, Any]],
-    ) -> None:
-        """Append injected user messages while preserving role alternation."""
-        for injection in injections:
-            if (
-                messages
-                and injection.get("role") == "user"
-                and messages[-1].get("role") == "user"
-            ):
-                merged = dict(messages[-1])
-                merged["content"] = cls._merge_message_content(
-                    merged.get("content"),
-                    injection.get("content"),
-                )
-                messages[-1] = merged
-                continue
-            messages.append(injection)
-
-    async def _drain_injections(self, spec: AgentRunSpec) -> list[dict[str, Any]]:
-        """Drain pending user messages via the injection callback.
-
-        Returns normalized user messages (capped by
-        ``_MAX_INJECTIONS_PER_TURN``), or an empty list when there is
-        nothing to inject. Messages beyond the cap are logged so they
-        are not silently lost.
-        """
-        if spec.injection_callback is None:
-            return []
-        try:
-            signature = inspect.signature(spec.injection_callback)
-            accepts_limit = (
-                "limit" in signature.parameters
-                or any(
-                    parameter.kind is inspect.Parameter.VAR_KEYWORD
-                    for parameter in signature.parameters.values()
-                )
-            )
-            if accepts_limit:
-                items = await spec.injection_callback(limit=_MAX_INJECTIONS_PER_TURN)
-            else:
-                items = await spec.injection_callback()
-        except Exception:
-            logger.exception("injection_callback failed")
-            return []
-        if not items:
-            return []
-        injected_messages: list[dict[str, Any]] = []
-        for item in items:
-            if isinstance(item, dict) and item.get("role") == "user" and "content" in item:
-                injected_messages.append(item)
-                continue
-            text = getattr(item, "content", str(item))
-            if text.strip():
-                injected_messages.append({"role": "user", "content": text})
-        if len(injected_messages) > _MAX_INJECTIONS_PER_TURN:
-            dropped = len(injected_messages) - _MAX_INJECTIONS_PER_TURN
-            logger.warning(
-                "Injection callback returned {} messages, capping to {} ({} dropped)",
-                len(injected_messages), _MAX_INJECTIONS_PER_TURN, dropped,
-            )
-            injected_messages = injected_messages[:_MAX_INJECTIONS_PER_TURN]
-        return injected_messages
-
     async def run(self, spec: AgentRunSpec) -> AgentRunResult:
         hook = spec.hook or AgentHook()
         messages = list(spec.initial_messages)
         final_content: str | None = None
+        last_real_response: str | None = None
         tools_used: list[str] = []
         usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
         error: str | None = None
         stop_reason = "completed"
         tool_events: list[dict[str, str]] = []
         external_lookup_counts: dict[str, int] = {}
+        completion_check_rounds = 0
+        _suppress_streaming = False  # True when next call is a completion-check confirmation
         empty_content_retries = 0
-        length_recovery_count = 0
-        had_injections = False
-        injection_cycles = 0
 
         for iteration in range(spec.max_iterations):
+            # Capture and reset the per-iteration streaming suppression flag.
+            # Completion-check confirmation calls should not stream to the user.
+            _streaming_this_iter = not _suppress_streaming
+            _suppress_streaming = False
             try:
-                # Keep the persisted conversation untouched. Context governance
-                # may repair or compact historical messages for the model, but
-                # those synthetic edits must not shift the append boundary used
-                # later when the caller saves only the new turn.
-                messages_for_model = self._drop_orphan_tool_results(messages)
-                messages_for_model = self._backfill_missing_tool_results(messages_for_model)
-                messages_for_model = self._microcompact(messages_for_model)
-                messages_for_model = self._apply_tool_result_budget(spec, messages_for_model)
-                messages_for_model = self._snip_history(spec, messages_for_model)
-                # Snipping may have created new orphans; clean them up.
-                messages_for_model = self._drop_orphan_tool_results(messages_for_model)
-                messages_for_model = self._backfill_missing_tool_results(messages_for_model)
+                messages = self._backfill_missing_tool_results(messages)
+                messages = self._microcompact(messages)
+                messages = self._apply_tool_result_budget(spec, messages)
+                messages_for_model = self._snip_history(spec, messages)
             except Exception as exc:
                 logger.warning(
-                    "Context governance failed on turn {} for {}: {}; applying minimal repair",
+                    "Context governance failed on turn {} for {}: {}; using raw messages",
                     iteration,
                     spec.session_key or "default",
                     exc,
                 )
-                try:
-                    messages_for_model = self._drop_orphan_tool_results(messages)
-                    messages_for_model = self._backfill_missing_tool_results(messages_for_model)
-                except Exception:
-                    messages_for_model = messages
+                messages_for_model = messages
             context = AgentHookContext(iteration=iteration, messages=messages)
             await hook.before_iteration(context)
-            response = await self._request_model(spec, messages_for_model, hook, context)
+            response = await self._request_model(
+                spec, messages_for_model, hook, context,
+                skip_stream=not _streaming_this_iter,
+            )
             raw_usage = self._usage_dict(response.usage)
             context.response = response
             context.usage = dict(raw_usage)
@@ -263,6 +169,16 @@ class AgentRunner:
                 tool_events.extend(new_events)
                 context.tool_results = list(results)
                 context.tool_events = list(new_events)
+                if fatal_error is not None:
+                    error = f"Error: {type(fatal_error).__name__}: {fatal_error}"
+                    final_content = error
+                    stop_reason = "tool_error"
+                    self._append_final_message(messages, final_content)
+                    context.final_content = final_content
+                    context.error = error
+                    context.stop_reason = stop_reason
+                    await hook.after_iteration(context)
+                    break
                 completed_tool_results: list[dict[str, Any]] = []
                 for tool_call, result in zip(response.tool_calls, results):
                     tool_message = {
@@ -278,16 +194,6 @@ class AgentRunner:
                     }
                     messages.append(tool_message)
                     completed_tool_results.append(tool_message)
-                if fatal_error is not None:
-                    error = f"Error: {type(fatal_error).__name__}: {fatal_error}"
-                    final_content = error
-                    stop_reason = "tool_error"
-                    self._append_final_message(messages, final_content)
-                    context.final_content = final_content
-                    context.error = error
-                    context.stop_reason = stop_reason
-                    await hook.after_iteration(context)
-                    break
                 await self._emit_checkpoint(
                     spec,
                     {
@@ -300,22 +206,101 @@ class AgentRunner:
                     },
                 )
                 empty_content_retries = 0
-                length_recovery_count = 0
-                # Checkpoint 1: drain injections after tools, before next LLM call
-                if injection_cycles < _MAX_INJECTION_CYCLES:
-                    injections = await self._drain_injections(spec)
-                    if injections:
-                        had_injections = True
-                        injection_cycles += 1
-                        self._append_injected_messages(messages, injections)
-                        logger.info(
-                            "Injected {} follow-up message(s) after tool execution ({}/{})",
-                            len(injections), injection_cycles, _MAX_INJECTION_CYCLES,
-                        )
+                await hook.after_tool_results(context)
                 await hook.after_iteration(context)
                 continue
 
             clean = hook.finalize_content(context, response.content)
+
+            # Detect XML function-call syntax (<function=name>...</function>) in text responses.
+            # The model sometimes outputs this format when it wants to invoke a skill but skips
+            # the required exec flow. Intercept it and redirect with a correction.
+            xml_skill_name = self._detect_xml_skill_call(clean)
+            if xml_skill_name is not None and response.finish_reason != "error":
+                snippet = (clean or "")[:200].replace("\n", " ")
+                is_registered_tool = xml_skill_name in spec.tools.tool_names
+                logger.warning(
+                    "XML {} call detected on turn {}/{} for {} | name='{}' | snippet='{}'",
+                    "tool" if is_registered_tool else "skill",
+                    iteration,
+                    spec.max_iterations,
+                    spec.session_key or "default",
+                    xml_skill_name,
+                    snippet,
+                )
+                if hook.wants_streaming() and _streaming_this_iter:
+                    await hook.on_stream_end(context, resuming=True)
+
+                if is_registered_tool:
+                    # Models like Qwen consistently ignore text corrections asking them to
+                    # reformat.  Parse the XML call and execute it directly so the loop
+                    # can continue with a real tool result instead of looping forever.
+                    parsed = self._parse_xml_tool_call(clean)
+                    if parsed is not None:
+                        xml_tc_name, xml_tc_args = parsed
+                        xml_tc = ToolCallRequest(
+                            id=f"xml_{iteration}",
+                            name=xml_tc_name,
+                            arguments=xml_tc_args,
+                        )
+                        logger.info(
+                            "Executing XML tool call directly: {}({}) for {}",
+                            xml_tc_name, list(xml_tc_args.keys()),
+                            spec.session_key or "default",
+                        )
+                        # Record the assistant turn with the XML text as its content so
+                        # the conversation history remains coherent.
+                        messages.append(build_assistant_message(
+                            clean or "",
+                            tool_calls=[xml_tc.to_openai_tool_call()],
+                            reasoning_content=response.reasoning_content,
+                            thinking_blocks=response.thinking_blocks,
+                        ))
+                        tools_used.append(xml_tc_name)
+                        xml_results, xml_events, xml_fatal = await self._execute_tools(
+                            spec, [xml_tc], external_lookup_counts,
+                        )
+                        tool_events.extend(xml_events)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": xml_tc.id,
+                            "name": xml_tc_name,
+                            "content": self._normalize_tool_result(
+                                spec, xml_tc.id, xml_tc_name, xml_results[0],
+                            ),
+                        })
+                        empty_content_retries = 0
+                        await hook.after_tool_results(context)
+                        await hook.after_iteration(context)
+                        continue
+                    # Parsing failed — fall back to a correction prompt
+                    correction = (
+                        f"`{xml_skill_name}` is a registered tool — do not output tool calls as "
+                        f"raw XML text. Issue a proper function call for `{xml_skill_name}` "
+                        f"through the API on your next response."
+                    )
+                else:
+                    correction = (
+                        f"`<function={xml_skill_name}>` syntax is not supported. "
+                        f"Skills must be invoked via the `exec` tool. "
+                        f"Use `read_file` on the skill's SKILL.md (see `<location>` in the skills listing), "
+                        f"then call `exec` with the shell command shown there. "
+                        f"The `<baseDir>` value in the skills listing gives you the path to substitute for {{baseDir}}."
+                    )
+                messages.append(build_assistant_message(
+                    clean or "",
+                    reasoning_content=response.reasoning_content,
+                    thinking_blocks=response.thinking_blocks,
+                ))
+                messages.append({"role": "user", "content": correction})
+                logger.debug(
+                    "XML call redirect correction appended for {} | total messages={}",
+                    spec.session_key or "default",
+                    len(messages),
+                )
+                await hook.after_iteration(context)
+                continue
+
             if response.finish_reason != "error" and is_blank_text(clean):
                 empty_content_retries += 1
                 if empty_content_retries < _MAX_EMPTY_RETRIES:
@@ -326,6 +311,7 @@ class AgentRunner:
                         empty_content_retries,
                         _MAX_EMPTY_RETRIES,
                     )
+                    messages.append(build_finalization_retry_message())
                     if hook.wants_streaming():
                         await hook.on_stream_end(context, resuming=False)
                     await hook.after_iteration(context)
@@ -336,9 +322,13 @@ class AgentRunner:
                     spec.session_key or "default",
                     empty_content_retries,
                 )
-                if hook.wants_streaming():
+                if hook.wants_streaming() and _streaming_this_iter:
                     await hook.on_stream_end(context, resuming=False)
-                response = await self._request_finalization_retry(spec, messages_for_model)
+                response = await self._request_finalization_retry(
+                    spec, messages_for_model,
+                    hook=hook if _streaming_this_iter else None,
+                    context=context if _streaming_this_iter else None,
+                )
                 retry_usage = self._usage_dict(response.usage)
                 self._accumulate_usage(usage, retry_usage)
                 raw_usage = self._merge_usage(raw_usage, retry_usage)
@@ -347,82 +337,63 @@ class AgentRunner:
                 context.tool_calls = list(response.tool_calls)
                 clean = hook.finalize_content(context, response.content)
 
-            if response.finish_reason == "length" and not is_blank_text(clean):
-                length_recovery_count += 1
-                if length_recovery_count <= _MAX_LENGTH_RECOVERIES:
-                    logger.info(
-                        "Output truncated on turn {} for {} ({}/{}); continuing",
+            # NOTE: on_stream_end is intentionally NOT called unconditionally here.
+            # Each decision branch below calls it with the right resuming flag so that:
+            # - real content is finalized before a completion-check continuation
+            # - the confirmation-check call is run non-streaming (_suppress_streaming)
+
+            if response.finish_reason == "error":
+                error_detail = clean or spec.error_message or _DEFAULT_ERROR_MESSAGE
+                if self._is_input_validation_error(error_detail):
+                    before = len(messages)
+                    logger.warning(
+                        "LLM returned input validation error on turn {} for {}: {}",
                         iteration,
                         spec.session_key or "default",
-                        length_recovery_count,
-                        _MAX_LENGTH_RECOVERIES,
+                        error_detail,
                     )
-                    if hook.wants_streaming():
-                        await hook.on_stream_end(context, resuming=True)
+                    snipped = self._snip_history(spec, messages)
+                    if len(snipped) < before:
+                        messages = snipped
+                        logger.warning(
+                            "Snipped {} -> {} messages and retrying",
+                            before,
+                            len(messages),
+                        )
+                    else:
+                        # No context window configured or snip had no effect — hard-truncate to recent messages
+                        system_msgs = [m for m in messages if m.get("role") == "system"]
+                        non_system = [m for m in messages if m.get("role") != "system"]
+                        keep = non_system[-8:] if len(non_system) > 8 else non_system
+                        messages = system_msgs + keep
+                        logger.warning(
+                            "Hard-truncated {} -> {} messages and retrying",
+                            before,
+                            len(messages),
+                        )
+                else:
+                    logger.warning(
+                        "LLM returned error on turn {} for {}: {}",
+                        iteration,
+                        spec.session_key or "default",
+                        error_detail,
+                    )
                     messages.append(build_assistant_message(
-                        clean,
+                        "(LLM error occurred, retrying...)",
                         reasoning_content=response.reasoning_content,
                         thinking_blocks=response.thinking_blocks,
                     ))
-                    messages.append(build_length_recovery_message())
-                    await hook.after_iteration(context)
-                    continue
-
-            assistant_message: dict[str, Any] | None = None
-            if response.finish_reason != "error" and not is_blank_text(clean):
-                assistant_message = build_assistant_message(
-                    clean,
-                    reasoning_content=response.reasoning_content,
-                    thinking_blocks=response.thinking_blocks,
-                )
-
-            # Check for mid-turn injections BEFORE signaling stream end.
-            # If injections are found we keep the stream alive (resuming=True)
-            # so streaming channels don't prematurely finalize the card.
-            _injected_after_final = False
-            if injection_cycles < _MAX_INJECTION_CYCLES:
-                injections = await self._drain_injections(spec)
-                if injections:
-                    had_injections = True
-                    injection_cycles += 1
-                    _injected_after_final = True
-                    if assistant_message is not None:
-                        messages.append(assistant_message)
-                        await self._emit_checkpoint(
-                            spec,
-                            {
-                                "phase": "final_response",
-                                "iteration": iteration,
-                                "model": spec.model,
-                                "assistant_message": assistant_message,
-                                "completed_tool_results": [],
-                                "pending_tool_calls": [],
-                            },
-                        )
-                    self._append_injected_messages(messages, injections)
-                    logger.info(
-                        "Injected {} follow-up message(s) after final response ({}/{})",
-                        len(injections), injection_cycles, _MAX_INJECTION_CYCLES,
-                    )
-
-            if hook.wants_streaming():
-                await hook.on_stream_end(context, resuming=_injected_after_final)
-
-            if _injected_after_final:
+                    messages.append({
+                        "role": "user",
+                        "content": f"The previous request failed with: {error_detail[:500]}. Please continue with your task using the conversation above."
+                    })
+                if hook.wants_streaming() and _streaming_this_iter:
+                    await hook.on_stream_end(context, resuming=True)
                 await hook.after_iteration(context)
                 continue
-
-            if response.finish_reason == "error":
-                final_content = clean or spec.error_message or _DEFAULT_ERROR_MESSAGE
-                stop_reason = "error"
-                error = final_content
-                self._append_model_error_placeholder(messages)
-                context.final_content = final_content
-                context.error = error
-                context.stop_reason = stop_reason
-                await hook.after_iteration(context)
-                break
             if is_blank_text(clean):
+                if hook.wants_streaming() and _streaming_this_iter:
+                    await hook.on_stream_end(context, resuming=False)
                 final_content = EMPTY_FINAL_RESPONSE_MESSAGE
                 stop_reason = "empty_final_response"
                 error = final_content
@@ -433,7 +404,48 @@ class AgentRunner:
                 await hook.after_iteration(context)
                 break
 
-            messages.append(assistant_message or build_assistant_message(
+            # Track the last real response (with actual content, not meta-summaries)
+            # A "real response" has tool calls or is not a completion confirmation
+            has_tool_calls = bool(response.tool_calls)
+            is_done_prefix = is_completion_confirmed(clean)[0]
+            if has_tool_calls or not is_done_prefix:
+                last_real_response = clean
+
+            if spec.max_completion_checks > 0 and completion_check_rounds < spec.max_completion_checks:
+                if not is_done_prefix:
+                    # Finalize the real content stream now, then suppress streaming for
+                    # the next (confirmation-check) call so it doesn't reach the user.
+                    if hook.wants_streaming() and _streaming_this_iter:
+                        await hook.on_stream_end(context, resuming=False)
+                    _suppress_streaming = True
+                    completion_check_rounds += 1
+                    logger.info(
+                        "Completion check round {} for {}; task not confirmed complete, continuing",
+                        completion_check_rounds,
+                        spec.session_key or "default",
+                    )
+                    messages.append(build_assistant_message(
+                        clean,
+                        reasoning_content=response.reasoning_content,
+                        thinking_blocks=response.thinking_blocks,
+                    ))
+                    messages.append(build_completion_check_message())
+                    await hook.after_iteration(context)
+                    continue
+
+                # Task is confirmed complete — use the last real response, not the meta-summary.
+                # on_stream_end was already called in the previous (not-confirmed) iteration.
+                if hook.wants_streaming() and _streaming_this_iter:
+                    await hook.on_stream_end(context, resuming=False)
+                final_content = last_real_response if last_real_response is not None else clean
+                context.final_content = final_content
+                context.stop_reason = stop_reason
+                await hook.after_iteration(context)
+                break
+
+            if hook.wants_streaming() and _streaming_this_iter:
+                await hook.on_stream_end(context, resuming=False)
+            messages.append(build_assistant_message(
                 clean,
                 reasoning_content=response.reasoning_content,
                 thinking_blocks=response.thinking_blocks,
@@ -476,7 +488,6 @@ class AgentRunner:
             stop_reason=stop_reason,
             error=error,
             tool_events=tool_events,
-            had_injections=had_injections,
         )
 
     def _build_request_kwargs(
@@ -507,13 +518,15 @@ class AgentRunner:
         messages: list[dict[str, Any]],
         hook: AgentHook,
         context: AgentHookContext,
+        *,
+        skip_stream: bool = False,
     ):
         kwargs = self._build_request_kwargs(
             spec,
             messages,
             tools=spec.tools.get_definitions(),
         )
-        if hook.wants_streaming():
+        if hook.wants_streaming() and not skip_stream:
             async def _stream(delta: str) -> None:
                 await hook.on_stream(context, delta)
 
@@ -527,11 +540,89 @@ class AgentRunner:
         self,
         spec: AgentRunSpec,
         messages: list[dict[str, Any]],
+        *,
+        hook: AgentHook | None = None,
+        context: AgentHookContext | None = None,
     ):
         retry_messages = list(messages)
         retry_messages.append(build_finalization_retry_message())
         kwargs = self._build_request_kwargs(spec, retry_messages, tools=None)
+        if hook is not None and hook.wants_streaming() and context is not None:
+            async def _stream(delta: str) -> None:
+                await hook.on_stream(context, delta)
+            return await self.provider.chat_stream_with_retry(**kwargs, on_content_delta=_stream)
         return await self.provider.chat_with_retry(**kwargs)
+
+    _XML_SKILL_CALL_RE = re.compile(r"<function=([A-Za-z0-9_:.-]+)\s*>", re.IGNORECASE)
+    # Matches <parameter=KEY>VALUE</parameter> used by Qwen-style XML tool calls
+    _XML_PARAM_RE = re.compile(r'<parameter=([A-Za-z0-9_]+)>([\s\S]*?)</parameter>', re.IGNORECASE)
+    # Matches <parameter name="KEY">VALUE</parameter> (alternative format)
+    _XML_PARAM_NAMED_RE = re.compile(r'<parameter\s+name=["\']([A-Za-z0-9_]+)["\']>([\s\S]*?)</parameter>', re.IGNORECASE)
+
+    @classmethod
+    def _detect_xml_skill_call(cls, text: str | None) -> str | None:
+        """Return the function name if text contains a bare <function=name> XML invocation, else None."""
+        if not text or "<function=" not in text:
+            return None
+        m = cls._XML_SKILL_CALL_RE.search(text)
+        return m.group(1) if m else None
+
+    @classmethod
+    def _parse_xml_tool_call(cls, text: str | None) -> tuple[str, dict[str, Any]] | None:
+        """Parse a Qwen-style XML tool call into (tool_name, args_dict).
+
+        Handles two parameter formats::
+
+            <function=web_search>
+            <parameter=query>some text</parameter>
+            </function>
+
+            <function=web_search>
+            <parameter name="query">some text</parameter>
+            </function>
+
+        Returns None if the text cannot be parsed.
+        """
+        if not text or "<function=" not in text:
+            return None
+        m = cls._XML_SKILL_CALL_RE.search(text)
+        if not m:
+            return None
+        tool_name = m.group(1)
+
+        args: dict[str, Any] = {}
+        for pm in cls._XML_PARAM_RE.finditer(text):
+            args[pm.group(1)] = pm.group(2).strip()
+        if not args:
+            for pm in cls._XML_PARAM_NAMED_RE.finditer(text):
+                args[pm.group(1)] = pm.group(2).strip()
+
+        # Last resort: try a JSON object inside <function=...>...</function>
+        if not args:
+            json_m = re.search(r'<function=[^>]+>\s*(\{[\s\S]*?\})\s*(?:</function>|$)', text, re.I)
+            if json_m:
+                import json as _json
+                try:
+                    args = _json.loads(json_m.group(1))
+                except Exception:
+                    pass
+
+        return tool_name, args
+
+    _INPUT_VALIDATION_ERROR_MARKERS = (
+        "input validation error",
+        "\"code\":400",
+        "'code': 400",
+        "400",
+    )
+
+    @classmethod
+    def _is_input_validation_error(cls, content: str | None) -> bool:
+        """Return True if the error looks like a provider 400 / input validation error."""
+        err = (content or "").lower()
+        return "input validation" in err or (
+            "400" in err and ("provider returned error" in err or "invalid" in err)
+        )
 
     @staticmethod
     def _usage_dict(usage: dict[str, Any] | None) -> dict[str, int]:
@@ -591,7 +682,7 @@ class AgentRunner:
         tool_call: ToolCallRequest,
         external_lookup_counts: dict[str, int],
     ) -> tuple[Any, dict[str, str], BaseException | None]:
-        _HINT = "\n\n[Analyze the error above and try a different approach.]"
+        _hint = "\n\n[Analyze the error above and try a different approach.]"
         lookup_error = repeated_external_lookup_error(
             tool_call.name,
             tool_call.arguments,
@@ -604,8 +695,8 @@ class AgentRunner:
                 "detail": "repeated external lookup blocked",
             }
             if spec.fail_on_tool_error:
-                return lookup_error + _HINT, event, RuntimeError(lookup_error)
-            return lookup_error + _HINT, event, None
+                return lookup_error + _hint, event, RuntimeError(lookup_error)
+            return lookup_error + _hint, event, None
         prepare_call = getattr(spec.tools, "prepare_call", None)
         tool, params, prep_error = None, tool_call.arguments, None
         if callable(prepare_call):
@@ -621,7 +712,7 @@ class AgentRunner:
                 "status": "error",
                 "detail": prep_error.split(": ", 1)[-1][:120],
             }
-            return prep_error + _HINT, event, RuntimeError(prep_error) if spec.fail_on_tool_error else None
+            return prep_error + _hint, event, RuntimeError(prep_error) if spec.fail_on_tool_error else None
         try:
             if tool is not None:
                 result = await tool.execute(**params)
@@ -646,8 +737,8 @@ class AgentRunner:
                 "detail": result.replace("\n", " ").strip()[:120],
             }
             if spec.fail_on_tool_error:
-                return result + _HINT, event, RuntimeError(result)
-            return result + _HINT, event, None
+                return result + _hint, event, RuntimeError(result)
+            return result + _hint, event, None
 
         detail = "" if result is None else str(result)
         detail = detail.replace("\n", " ").strip()
@@ -681,12 +772,6 @@ class AgentRunner:
             return
         messages.append(build_assistant_message(content))
 
-    @staticmethod
-    def _append_model_error_placeholder(messages: list[dict[str, Any]]) -> None:
-        if messages and messages[-1].get("role") == "assistant" and not messages[-1].get("tool_calls"):
-            return
-        messages.append(build_assistant_message(_PERSISTED_MODEL_ERROR_PLACEHOLDER))
-
     def _normalize_tool_result(
         self,
         spec: AgentRunSpec,
@@ -714,32 +799,6 @@ class AgentRunner:
         if isinstance(content, str) and len(content) > spec.max_tool_result_chars:
             return truncate_text(content, spec.max_tool_result_chars)
         return content
-
-    @staticmethod
-    def _drop_orphan_tool_results(
-        messages: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """Drop tool results that have no matching assistant tool_call earlier in the history."""
-        declared: set[str] = set()
-        updated: list[dict[str, Any]] | None = None
-        for idx, msg in enumerate(messages):
-            role = msg.get("role")
-            if role == "assistant":
-                for tc in msg.get("tool_calls") or []:
-                    if isinstance(tc, dict) and tc.get("id"):
-                        declared.add(str(tc["id"]))
-            if role == "tool":
-                tid = msg.get("tool_call_id")
-                if tid and str(tid) not in declared:
-                    if updated is None:
-                        updated = [dict(m) for m in messages[:idx]]
-                    continue
-            if updated is not None:
-                updated.append(dict(msg))
-
-        if updated is None:
-            return messages
-        return updated
 
     @staticmethod
     def _backfill_missing_tool_results(

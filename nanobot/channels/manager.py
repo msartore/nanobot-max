@@ -36,13 +36,18 @@ class ChannelManager:
         self._init_channels()
 
     def _init_channels(self) -> None:
-        """Initialize channels discovered via pkgutil scan + entry_points plugins."""
+        """Initialize only the channels that are configured and enabled."""
         from nanobot.channels.registry import discover_all
 
         transcription_provider = self.config.channels.transcription_provider
         transcription_key = self._resolve_transcription_key(transcription_provider)
 
-        for name, cls in discover_all().items():
+        all_channels = discover_all()
+        # Exclude declared ChannelsConfig fields — only extra fields are channel configs.
+        # Also exclude transcription_api_key which some users set as an extra field.
+        _non_channel = set(type(self.config.channels).model_fields.keys()) | {"transcription_api_key"}
+        configured_channel_names = self.config.channels.model_fields_set - _non_channel
+        for name in configured_channel_names:
             section = getattr(self.config.channels, name, None)
             if section is None:
                 continue
@@ -52,6 +57,12 @@ class ChannelManager:
                 else getattr(section, "enabled", False)
             )
             if not enabled:
+                continue
+            cls = all_channels.get(name)
+            if cls is None:
+                logger.warning(
+                    "Channel '{}' is configured but not available (missing dependencies?)", name
+                )
                 continue
             try:
                 channel = cls(section, self.bus)
@@ -116,14 +127,16 @@ class ChannelManager:
         target = self.channels.get(notice.channel)
         if not target:
             return
-        asyncio.create_task(self._send_with_retry(
-            target,
-            OutboundMessage(
-                channel=notice.channel,
-                chat_id=notice.chat_id,
-                content=format_restart_completed_message(notice.started_at_raw),
-            ),
-        ))
+        asyncio.create_task(
+            self._send_with_retry(
+                target,
+                OutboundMessage(
+                    channel=notice.channel,
+                    chat_id=notice.chat_id,
+                    content=format_restart_completed_message(notice.started_at_raw),
+                ),
+            )
+        )
 
     async def stop_all(self) -> None:
         """Stop all channels and the dispatcher."""
@@ -159,16 +172,21 @@ class ChannelManager:
                 if pending:
                     msg = pending.pop(0)
                 else:
-                    msg = await asyncio.wait_for(
-                        self.bus.consume_outbound(),
-                        timeout=1.0
-                    )
+                    msg = await asyncio.wait_for(self.bus.consume_outbound(), timeout=1.0)
 
                 if msg.metadata.get("_progress"):
-                    if msg.metadata.get("_tool_hint") and not self.config.channels.send_tool_hints:
-                        continue
-                    if not msg.metadata.get("_tool_hint") and not self.config.channels.send_progress:
-                        continue
+                    is_tool_results = msg.metadata.get("_tool_results", False)
+                    if not is_tool_results:
+                        if (
+                            msg.metadata.get("_tool_hint")
+                            and not self.config.channels.send_tool_hints
+                        ):
+                            continue
+                        if (
+                            not msg.metadata.get("_tool_hint")
+                            and not self.config.channels.send_progress
+                        ):
+                            continue
 
                 # Coalesce consecutive _stream_delta messages for the same (channel, chat_id)
                 # to reduce API calls and improve streaming latency
@@ -190,7 +208,12 @@ class ChannelManager:
     @staticmethod
     async def _send_once(channel: BaseChannel, msg: OutboundMessage) -> None:
         """Send one outbound message without retry policy."""
-        if msg.metadata.get("_stream_delta") or msg.metadata.get("_stream_end"):
+        is_editable = (
+            msg.metadata.get("_stream_delta")
+            or msg.metadata.get("_stream_end")
+            or msg.metadata.get("_tool_results")
+        )
+        if is_editable:
             await channel.send_delta(msg.chat_id, msg.content, msg.metadata)
         elif not msg.metadata.get("_streamed"):
             await channel.send(msg)
@@ -262,13 +285,20 @@ class ChannelManager:
                 if attempt == max_attempts - 1:
                     logger.error(
                         "Failed to send to {} after {} attempts: {} - {}",
-                        msg.channel, max_attempts, type(e).__name__, e
+                        msg.channel,
+                        max_attempts,
+                        type(e).__name__,
+                        e,
                     )
                     return
                 delay = _SEND_RETRY_DELAYS[min(attempt, len(_SEND_RETRY_DELAYS) - 1)]
                 logger.warning(
                     "Send to {} failed (attempt {}/{}): {}, retrying in {}s",
-                    msg.channel, attempt + 1, max_attempts, type(e).__name__, delay
+                    msg.channel,
+                    attempt + 1,
+                    max_attempts,
+                    type(e).__name__,
+                    delay,
                 )
                 try:
                     await asyncio.sleep(delay)
@@ -282,10 +312,7 @@ class ChannelManager:
     def get_status(self) -> dict[str, Any]:
         """Get status of all channels."""
         return {
-            name: {
-                "enabled": True,
-                "running": channel.is_running
-            }
+            name: {"enabled": True, "running": channel.is_running}
             for name, channel in self.channels.items()
         }
 

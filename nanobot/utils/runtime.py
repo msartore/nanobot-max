@@ -24,6 +24,20 @@ LENGTH_RECOVERY_PROMPT = (
     "— no recap, no apology. Break remaining work into smaller steps if needed."
 )
 
+COMPLETION_CHECK_PROMPT = (
+    "Review the original task and all tool results above. "
+    "Is the task FULLY complete? If not, briefly state what remains and call tools to finish it. "
+    "If fully complete, start your response with DONE: followed by the final answer."
+)
+
+CONTEXT_COMPACTION_PROMPT = (
+    "Summarize the following conversation history into a concise summary. "
+    "Include: the original task, key decisions made, tool results obtained, "
+    "and current progress state. Omit redundant details and verbose outputs. "
+    "Keep all important facts, code snippets, and file paths. "
+    "Format as a structured summary with clear sections."
+)
+
 
 def empty_tool_result_message(tool_name: str) -> str:
     """Short prompt-safe marker for tools that completed without visible output."""
@@ -55,9 +69,26 @@ def build_finalization_retry_message() -> dict[str, str]:
     return {"role": "user", "content": FINALIZATION_RETRY_PROMPT}
 
 
-def build_length_recovery_message() -> dict[str, str]:
-    """Prompt the model to continue after hitting output token limit."""
-    return {"role": "user", "content": LENGTH_RECOVERY_PROMPT}
+def build_completion_check_message() -> dict[str, str]:
+    """A prompt that asks the LLM to verify task completion."""
+    return {"role": "user", "content": COMPLETION_CHECK_PROMPT}
+
+
+def is_completion_confirmed(content: str | None) -> tuple[bool, str | None]:
+    """Check if the LLM confirmed task completion with DONE: prefix.
+
+    Returns (True, final_answer) if confirmed, (False, remaining_work) if not.
+    """
+    if content is None:
+        return False, None
+    stripped = content.strip()
+    if stripped.upper().startswith("DONE:"):
+        answer = stripped[5:].strip()
+        return True, answer if answer else stripped
+    if stripped.upper().startswith("DONE"):
+        rest = stripped[4:].strip().lstrip(":").strip()
+        return True, rest if rest else stripped
+    return False, stripped
 
 
 def external_lookup_signature(tool_name: str, arguments: dict[str, Any]) -> str | None:

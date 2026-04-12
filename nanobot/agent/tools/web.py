@@ -100,6 +100,10 @@ class WebSearchTool(Tool):
     def read_only(self) -> bool:
         return True
 
+    @property
+    def untrusted_content(self) -> bool:
+        return True
+
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
         provider = self.config.provider.strip().lower() or "brave"
         n = min(max(count or self.config.max_results, 1), 10)
@@ -282,8 +286,14 @@ class WebFetchTool(Tool):
     def read_only(self) -> bool:
         return True
 
-    async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> Any:
-        max_chars = maxChars or self.max_chars
+    @property
+    def untrusted_content(self) -> bool:
+        return True
+
+    async def execute(self, url: str, extract_mode: str = "markdown", max_chars: int | None = None, **kwargs: Any) -> Any:
+        # Accept camelCase param names as sent by the LLM (schema uses maxChars/extractMode)
+        max_chars = max_chars or kwargs.get("maxChars") or self.max_chars
+        extract_mode = kwargs.get("extractMode", extract_mode)
         is_valid, error_msg = _validate_url_safe(url)
         if not is_valid:
             return json.dumps({"error": f"URL validation failed: {error_msg}", "url": url}, ensure_ascii=False)
@@ -308,7 +318,7 @@ class WebFetchTool(Tool):
 
         result = await self._fetch_jina(url, max_chars)
         if result is None:
-            result = await self._fetch_readability(url, extractMode, max_chars)
+            result = await self._fetch_readability(url, extract_mode, max_chars)
         return result
 
     async def _fetch_jina(self, url: str, max_chars: int) -> str | None:
@@ -390,6 +400,21 @@ class WebFetchTool(Tool):
                 "extractor": extractor, "truncated": truncated, "length": len(text),
                 "untrusted": True, "text": text,
             }, ensure_ascii=False)
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status in (401, 403, 451):
+                logger.warning("WebFetch blocked ({}) for {}: use htmlunit_fetch", status, url)
+                return json.dumps({
+                    "error": (
+                        f"HTTP {status} — site is blocking plain HTTP requests. "
+                        f"Retry this URL with htmlunit_fetch, which runs a real browser."
+                    ),
+                    "url": url,
+                    "status": status,
+                    "hint": "use htmlunit_fetch",
+                }, ensure_ascii=False)
+            logger.error("WebFetch HTTP error for {}: {}", url, e)
+            return json.dumps({"error": str(e), "url": url, "status": status}, ensure_ascii=False)
         except httpx.ProxyError as e:
             logger.error("WebFetch proxy error for {}: {}", url, e)
             return json.dumps({"error": f"Proxy error: {e}", "url": url}, ensure_ascii=False)

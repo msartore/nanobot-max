@@ -171,6 +171,10 @@ class TestReadDeviceBlacklist:
         assert "Error" in result
 
     @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        __import__("sys").platform == "win32",
+        reason="Symlinks to /dev/* require admin privileges on Windows",
+    )
     async def test_symlink_to_dev_zero_blocked(self, tmp_path):
         tool = ReadFileTool(workspace=tmp_path)
         link = tmp_path / "zero-link"
