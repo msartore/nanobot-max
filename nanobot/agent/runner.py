@@ -377,11 +377,29 @@ class AgentRunner:
                         non_system = [m for m in messages if m.get("role") != "system"]
                         keep = non_system[-8:] if len(non_system) > 8 else non_system
                         messages = system_msgs + keep
+                        after = len(messages)
                         logger.warning(
                             "Hard-truncated {} -> {} messages and retrying",
                             before,
-                            len(messages),
+                            after,
                         )
+                        if after >= before:
+                            # Already at irreducible minimum — give up rather than looping forever
+                            final_content = "I'm sorry, the conversation context is too large for all available models and cannot be reduced further. Please start a new conversation."
+                            stop_reason = "context_overflow"
+                            error = final_content
+                            logger.warning(
+                                "Context irreducible for {} after hard-truncation; terminating",
+                                spec.session_key or "default",
+                            )
+                            self._append_final_message(messages, final_content)
+                            context.final_content = final_content
+                            context.error = final_content
+                            context.stop_reason = stop_reason
+                            if hook.wants_streaming() and _streaming_this_iter:
+                                await hook.on_stream_end(context, resuming=False)
+                            await hook.after_iteration(context)
+                            break
                 else:
                     logger.warning(
                         "LLM returned error on turn {} for {}: {}",

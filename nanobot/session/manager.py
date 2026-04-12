@@ -100,8 +100,11 @@ class SessionManager:
     Sessions are stored as JSONL files in the sessions directory.
     """
 
-    def __init__(self, workspace: Path):
+    _DEFAULT_MAX_MESSAGES = 500
+
+    def __init__(self, workspace: Path, max_messages: int = _DEFAULT_MAX_MESSAGES):
         self.workspace = workspace
+        self.max_messages = max_messages
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self.legacy_sessions_dir = get_legacy_sessions_dir()
         self._cache: dict[str, Session] = {}
@@ -174,7 +177,7 @@ class SessionManager:
                     else:
                         messages.append(data)
 
-            return Session(
+            session = Session(
                 key=key,
                 messages=messages,
                 created_at=created_at or datetime.now(),
@@ -182,12 +185,22 @@ class SessionManager:
                 metadata=metadata,
                 last_consolidated=last_consolidated
             )
+            if self.max_messages > 0 and len(messages) > self.max_messages:
+                logger.warning(
+                    "Session {} has {} messages (limit {}), trimming on load",
+                    key, len(messages), self.max_messages,
+                )
+                session.retain_recent_legal_suffix(self.max_messages)
+                self.save(session)
+            return session
         except Exception as e:
             logger.warning("Failed to load session {}: {}", key, e)
             return None
 
     def save(self, session: Session) -> None:
-        """Save a session to disk."""
+        """Save a session to disk, trimming to max_messages before writing."""
+        if self.max_messages > 0:
+            session.retain_recent_legal_suffix(self.max_messages)
         path = self._get_session_path(session.key)
 
         with open(path, "w", encoding="utf-8") as f:

@@ -307,6 +307,7 @@ class MemoryStore:
         with open(self.history_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
         self._cursor_file.write_text(str(cursor), encoding="utf-8")
+        self.compact_history()
         return cursor
 
     def _next_cursor(self) -> int:
