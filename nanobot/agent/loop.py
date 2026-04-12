@@ -150,7 +150,7 @@ class AgentLoop:
         bus: MessageBus,
         provider: LLMProvider,
         workspace: Path,
-        model: str | None = None,
+        model: str | list[str] | None = None,
         max_iterations: int | None = None,
         context_window_tokens: int | None = None,
         context_block_limit: int | None = None,
@@ -179,7 +179,12 @@ class AgentLoop:
         self.channels_config = channels_config
         self.provider = provider
         self.workspace = workspace
-        self.model = model or provider.get_default_model()
+        _raw_model = model or provider.get_default_model()
+        if isinstance(_raw_model, list):
+            self.models: list[str] = [m for m in _raw_model if m]
+        else:
+            self.models = [_raw_model]
+        self.model: str = self.models[0]
         self.max_iterations = (
             max_iterations if max_iterations is not None else defaults.max_tool_iterations
         )
@@ -398,6 +403,7 @@ class AgentLoop:
             context_block_limit=self.context_block_limit,
             context_compact_threshold_tokens=self.context_compact_threshold_tokens,
             compact_fn=self._make_compact_fn() if self.context_compact_threshold_tokens else None,
+            model_fallbacks=self.models[1:],
             provider_retry_mode=self.provider_retry_mode,
             progress_callback=on_progress,
             checkpoint_callback=_checkpoint,

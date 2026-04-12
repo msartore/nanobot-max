@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
@@ -63,7 +63,17 @@ class AgentDefaults(Base):
     """Default agent configuration."""
 
     workspace: str = "~/.nanobot/workspace"
-    model: str = "anthropic/claude-opus-4-5"
+    model: str | list[str] = "anthropic/claude-opus-4-5"
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def _normalize_model(cls, v: object) -> str | list[str]:
+        if isinstance(v, list):
+            items = [str(m).strip() for m in v if str(m).strip()]
+            if not items:
+                raise ValueError("model list must not be empty")
+            return items[0] if len(items) == 1 else items
+        return v
     provider: str = (
         "auto"  # Provider name (e.g. "anthropic", "openrouter") or "auto" for auto-detection
     )

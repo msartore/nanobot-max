@@ -66,6 +66,7 @@ class AgentRunSpec:
     context_block_limit: int | None = None
     context_compact_threshold_tokens: int | None = None
     compact_fn: Any | None = None  # Callable[[list[dict]], Awaitable[list[dict]]] | None
+    model_fallbacks: list[str] = field(default_factory=list)
     provider_retry_mode: str = "standard"
     progress_callback: Any | None = None
     checkpoint_callback: Any | None = None
@@ -531,20 +532,40 @@ class AgentRunner:
         *,
         skip_stream: bool = False,
     ):
-        kwargs = self._build_request_kwargs(
-            spec,
-            messages,
-            tools=spec.tools.get_definitions(),
-        )
-        if hook.wants_streaming() and not skip_stream:
-            async def _stream(delta: str) -> None:
-                await hook.on_stream(context, delta)
-
-            return await self.provider.chat_stream_with_retry(
-                **kwargs,
-                on_content_delta=_stream,
+        models_to_try = [spec.model, *spec.model_fallbacks]
+        last_response = None
+        for idx, model in enumerate(models_to_try):
+            kwargs = self._build_request_kwargs(
+                spec,
+                messages,
+                tools=spec.tools.get_definitions(),
             )
-        return await self.provider.chat_with_retry(**kwargs)
+            kwargs["model"] = model
+            if hook.wants_streaming() and not skip_stream:
+                async def _stream(delta: str) -> None:
+                    await hook.on_stream(context, delta)
+
+                response = await self.provider.chat_stream_with_retry(
+                    **kwargs,
+                    on_content_delta=_stream,
+                )
+            else:
+                response = await self.provider.chat_with_retry(**kwargs)
+
+            if response.finish_reason != "error":
+                return response
+
+            last_response = response
+            remaining = models_to_try[idx + 1:]
+            if remaining:
+                logger.warning(
+                    "Model {} failed for {} ({}), falling back to {}",
+                    model,
+                    spec.session_key or "default",
+                    (response.content or "")[:120].replace("\n", " "),
+                    remaining[0],
+                )
+        return last_response
 
     async def _request_finalization_retry(
         self,
