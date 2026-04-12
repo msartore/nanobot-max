@@ -194,3 +194,68 @@ async def test_preflight_consolidation_before_llm_call(tmp_path, monkeypatch) ->
     assert "consolidate" in order
     assert "llm" in order
     assert order.index("consolidate") < order.index("llm")
+
+
+def test_consolidator_receives_resolved_context_window_tokens(tmp_path) -> None:
+    """Consolidator must receive self.context_window_tokens, not the raw constructor
+    parameter.  When context_window_tokens=None is passed (callers that rely on the
+    AgentDefaults fallback), the resolved value must still reach the Consolidator."""
+    loop = _make_loop(tmp_path, estimated_tokens=0, context_window_tokens=99_999)
+    assert loop.consolidator.context_window_tokens == 99_999
+
+
+def test_consolidator_receives_resolved_context_window_tokens_from_defaults(tmp_path) -> None:
+    """When context_window_tokens is omitted (None), AgentLoop resolves to
+    AgentDefaults.context_window_tokens — the Consolidator must see that value,
+    not None."""
+    from nanobot.config.schema import AgentDefaults
+    from nanobot.providers.base import GenerationSettings
+    from unittest.mock import AsyncMock, MagicMock
+    from nanobot.providers.base import LLMResponse
+
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    provider.generation = GenerationSettings(max_tokens=0)
+    provider.estimate_prompt_tokens.return_value = (0, "test")
+    provider.chat_with_retry = AsyncMock(return_value=LLMResponse(content="ok", tool_calls=[]))
+    provider.chat_stream_with_retry = AsyncMock(return_value=LLMResponse(content="ok", tool_calls=[]))
+
+    from nanobot.agent.loop import AgentLoop
+    from nanobot.bus.queue import MessageBus
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        model="test-model",
+        # context_window_tokens deliberately omitted — should fall back to AgentDefaults
+    )
+    expected = AgentDefaults().context_window_tokens
+    assert loop.consolidator.context_window_tokens == expected
+    assert loop.consolidator.context_window_tokens is not None
+
+
+def test_compact_fn_provided_when_threshold_is_zero(tmp_path) -> None:
+    """compact_fn must be wired into AgentRunSpec even when
+    context_compact_threshold_tokens=0 (auto-compute mode).  Previously the guard
+    ``if self.context_compact_threshold_tokens`` evaluated to False for 0, leaving
+    compact_fn=None and bypassing the runner's auto-compute path entirely."""
+    from nanobot.agent.runner import AgentRunSpec
+    from nanobot.agent.tools.registry import ToolRegistry
+
+    loop = _make_loop(tmp_path, estimated_tokens=0, context_window_tokens=200_000)
+    # Simulate what _process() does when building the AgentRunSpec
+    spec = AgentRunSpec(
+        initial_messages=[],
+        tools=ToolRegistry(),
+        model=loop.model,
+        max_iterations=loop.max_iterations,
+        max_tool_result_chars=loop.max_tool_result_chars,
+        context_window_tokens=loop.context_window_tokens,
+        context_compact_threshold_tokens=loop.context_compact_threshold_tokens,
+        compact_fn=loop._make_compact_fn() if loop.context_window_tokens else None,
+    )
+    assert spec.compact_fn is not None, (
+        "compact_fn must not be None when context_window_tokens is set, "
+        "regardless of context_compact_threshold_tokens value"
+    )

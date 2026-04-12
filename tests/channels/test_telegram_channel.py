@@ -568,6 +568,27 @@ async def test_send_delta_initial_send_keeps_message_in_thread() -> None:
     assert channel._app.bot.sent_messages[0]["message_thread_id"] == 42
 
 
+@pytest.mark.asyncio
+async def test_send_delta_initial_send_truncates_oversized_text() -> None:
+    """When the first streaming delta already exceeds the Telegram limit, truncate
+    instead of raising BadRequest (which would cause 5 futile retries)."""
+    from nanobot.channels.telegram import TELEGRAM_MAX_MESSAGE_LEN
+
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["*"]),
+        MessageBus(),
+    )
+    channel._app = _FakeApp(lambda: None)
+
+    oversized = "A" * (TELEGRAM_MAX_MESSAGE_LEN + 500)
+    await channel.send_delta("123", oversized, {"_stream_delta": True, "_stream_id": "s:0"})
+
+    assert len(channel._app.bot.sent_messages) == 1
+    sent_text = channel._app.bot.sent_messages[0]["text"]
+    assert len(sent_text) <= TELEGRAM_MAX_MESSAGE_LEN
+    assert sent_text.endswith(" ...")
+
+
 def test_derive_topic_session_key_uses_thread_id() -> None:
     message = SimpleNamespace(
         chat=SimpleNamespace(type="supergroup"),
