@@ -448,3 +448,51 @@ async def test_input_validation_error_hard_truncates_without_context_window():
     assert message_counts[1] <= 8, (
         f"Expected hard truncation to <=8 non-system messages, got {message_counts[1]}"
     )
+
+
+@pytest.mark.asyncio
+async def test_context_too_long_error_triggers_truncation():
+    """When all fallback models return 'maximum context length exceeded', the runner
+    should truncate history rather than appending more messages and looping forever."""
+    runner = _make_runner()
+    call_count = {"n": 0}
+
+    initial_messages = [{"role": "user", "content": "Start"}]
+    for i in range(20):
+        initial_messages.append({"role": "assistant", "content": f"Step {i}"})
+        initial_messages.append({"role": "user", "content": f"Result {i}"})
+
+    message_counts = []
+
+    async def chat_with_retry(**kwargs):
+        call_count["n"] += 1
+        message_counts.append(len(kwargs.get("messages", [])))
+        if call_count["n"] == 1:
+            # Matches the exact error format seen in production OpenRouter logs
+            return LLMResponse(
+                content="Error: {'message': \"This endpoint's maximum context length is 262144 tokens. However, you requested about 340485 tokens (255489 of text input, 3076 of tool input, 81920 in the output).\", 'code': 400, 'metadata': {'provider_name': None}}",
+                finish_reason="error",
+                tool_calls=[],
+                usage={},
+            )
+        return LLMResponse(content="DONE: Recovered after truncation", tool_calls=[], usage={})
+
+    runner.provider.chat_with_retry = chat_with_retry
+
+    result = await runner.run(AgentRunSpec(
+        initial_messages=initial_messages,
+        tools=_make_tools(),
+        model="test-model",
+        max_iterations=5,
+        max_tool_result_chars=16000,
+        context_window_tokens=8000,
+        max_completion_checks=0,
+    ))
+
+    assert result.stop_reason == "completed"
+    assert "Recovered after truncation" in (result.final_content or "")
+    # Context must shrink — not grow — after the error
+    assert message_counts[1] < message_counts[0], (
+        f"Expected context to shrink after context-too-long error, "
+        f"but got {message_counts[0]} -> {message_counts[1]} messages"
+    )

@@ -651,9 +651,11 @@ class AgentRunner:
     def _is_input_validation_error(cls, content: str | None) -> bool:
         """Return True if the error looks like a provider 400 / input validation error."""
         err = (content or "").lower()
-        return "input validation" in err or (
-            "400" in err and ("provider returned error" in err or "invalid" in err)
-        )
+        if "input validation" in err:
+            return True
+        if "maximum context length" in err or "context_length_exceeded" in err:
+            return True
+        return "400" in err and ("provider returned error" in err or "invalid" in err)
 
     @staticmethod
     def _usage_dict(usage: dict[str, Any] | None) -> dict[str, int]:
