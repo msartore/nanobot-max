@@ -222,7 +222,12 @@ class ReadFileTool(_FsTool):
 
             # Read dedup: same path + offset + limit + unchanged mtime → stub
             if file_state.is_unchanged(fp, offset=offset, limit=limit):
-                return f"[File unchanged since last read: {path}]"
+                return (
+                    f"[File unchanged since last read: {path}] "
+                    f"The content is already in your context from the previous read. "
+                    f"If you need to send this file to the user, use: "
+                    f"message(content='Here is the file', media=['{path}'])"
+                )
 
             try:
                 text_content = raw.decode("utf-8")

@@ -446,8 +446,20 @@ def build_status_content(
     return "\n".join(lines)
 
 
+# Templates that the system owns and must keep current.
+# Users should not edit these; they are always overwritten on startup.
+_SYSTEM_OWNED_TEMPLATES = frozenset({"TOOLS.md"})
+
+
 def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]:
-    """Sync bundled templates to workspace. Only creates missing files."""
+    """Sync bundled templates to workspace.
+
+    User-editable files (AGENTS.md, SOUL.md, USER.md, …) are only created
+    when missing so user customisations are preserved.
+
+    System-owned files (TOOLS.md) are always overwritten from the bundled
+    template so the agent's tool guidance stays current across upgrades.
+    """
     from importlib.resources import files as pkg_files
     try:
         tpl = pkg_files("nanobot") / "templates"
@@ -458,16 +470,22 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
 
     added: list[str] = []
 
-    def _write(src, dest: Path):
+    def _write(src, dest: Path, *, force: bool = False):
+        new_content = src.read_text(encoding="utf-8") if src else ""
         if dest.exists():
-            return
+            if not force:
+                return
+            # Only overwrite when the content actually differs to avoid
+            # unnecessary disk writes and mtime churn.
+            if dest.read_text(encoding="utf-8") == new_content:
+                return
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(src.read_text(encoding="utf-8") if src else "", encoding="utf-8")
+        dest.write_text(new_content, encoding="utf-8")
         added.append(str(dest.relative_to(workspace)))
 
     for item in tpl.iterdir():
         if item.name.endswith(".md") and not item.name.startswith("."):
-            _write(item, workspace / item.name)
+            _write(item, workspace / item.name, force=item.name in _SYSTEM_OWNED_TEMPLATES)
     _write(tpl / "memory" / "MEMORY.md", workspace / "memory" / "MEMORY.md")
     _write(None, workspace / "memory" / "history.jsonl")
     (workspace / "skills").mkdir(exist_ok=True)

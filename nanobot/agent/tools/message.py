@@ -75,7 +75,9 @@ class MessageTool(Tool):
         return (
             "Send a message to the user, optionally with file attachments. "
             "This is the ONLY way to deliver files (images, documents, audio, video) to the user. "
-            "Use the 'media' parameter with file paths to attach files. "
+            "To send a file: use the 'media' parameter with the file path — do NOT paste file contents as text. "
+            "Example: message(content='Here is your report', media=['memory/finance/report.md']) "
+            "sends the file as a downloadable attachment. "
             "Do NOT use read_file to send files — that only reads content for your own analysis."
         )
 
