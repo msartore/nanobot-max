@@ -672,9 +672,14 @@ class TelegramChannel(BaseChannel):
             thread_kwargs["message_thread_id"] = message_thread_id
         if buf.message_id is None:
             try:
+                # Truncate to Telegram's limit on initial streaming send; the
+                # finalize step will replace it with the full split content.
+                text_to_send = buf.text
+                if len(text_to_send) > TELEGRAM_MAX_MESSAGE_LEN:
+                    text_to_send = text_to_send[: TELEGRAM_MAX_MESSAGE_LEN - 4] + " ..."
                 sent = await self._call_with_retry(
                     self._app.bot.send_message,
-                    chat_id=int_chat_id, text=buf.text,
+                    chat_id=int_chat_id, text=text_to_send,
                     **thread_kwargs,
                 )
                 buf.message_id = sent.message_id
