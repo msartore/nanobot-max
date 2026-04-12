@@ -58,6 +58,9 @@ class DiscordConfig(Base):
     working_emoji: str = "🔧"
     working_emoji_delay: float = 2.0
     streaming: bool = True
+    proxy: str | None = None
+    proxy_username: str | None = None
+    proxy_password: str | None = None
 
 
 if DISCORD_AVAILABLE:
@@ -65,9 +68,23 @@ if DISCORD_AVAILABLE:
     class DiscordBotClient(discord.Client):
         """discord.py client that forwards events to the channel."""
 
-        def __init__(self, channel: DiscordChannel, *, intents: discord.Intents) -> None:
-            super().__init__(intents=intents)
+        def __init__(
+            self,
+            channel: DiscordChannel,
+            *,
+            intents: discord.Intents,
+            proxy: str | None = None,
+            proxy_auth: object | None = None,
+        ) -> None:
+            kwargs: dict = {"intents": intents}
+            if proxy:
+                kwargs["proxy"] = proxy
+            if proxy_auth is not None:
+                kwargs["proxy_auth"] = proxy_auth
+            super().__init__(**kwargs)
             self._channel = channel
+            self.proxy = proxy
+            self.proxy_auth = proxy_auth
             self.tree = app_commands.CommandTree(self)
             self._register_app_commands()
 
@@ -292,7 +309,19 @@ class DiscordChannel(BaseChannel):
         try:
             intents = discord.Intents.none()
             intents.value = self.config.intents
-            self._client = DiscordBotClient(self, intents=intents)
+            proxy_auth = None
+            if self.config.proxy and self.config.proxy_username and self.config.proxy_password:
+                try:
+                    import aiohttp
+                    proxy_auth = aiohttp.BasicAuth(self.config.proxy_username, self.config.proxy_password)
+                except Exception:
+                    pass
+            self._client = DiscordBotClient(
+                self,
+                intents=intents,
+                proxy=self.config.proxy,
+                proxy_auth=proxy_auth,
+            )
         except Exception as e:
             logger.error("Failed to initialize Discord client: {}", e)
             self._client = None

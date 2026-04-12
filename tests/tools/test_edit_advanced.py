@@ -381,12 +381,16 @@ class TestFileSizeProtection:
             def st_size(self):
                 return 2 * 1024 * 1024 * 1024  # 2 GiB
 
+        import os
         import unittest.mock
         from pathlib import Path
         original_path_stat = Path.stat
+        # Use os.path.abspath for comparison — pure string operation, no stat calls,
+        # so the mock cannot recurse into itself.
+        f_abs = os.path.abspath(str(f))
 
         def selective_stat(self, **kwargs):
-            if self.resolve() == f.resolve():
+            if os.path.abspath(str(self)) == f_abs:
                 return FakeStat(original_path_stat(self))
             return original_path_stat(self, **kwargs)
 

@@ -18,9 +18,11 @@ class _FakeDiscordClient:
     instances: list["_FakeDiscordClient"] = []
     start_error: Exception | None = None
 
-    def __init__(self, owner, *, intents) -> None:
+    def __init__(self, owner, *, intents, proxy=None, proxy_auth=None) -> None:
         self.owner = owner
         self.intents = intents
+        self.proxy = proxy
+        self.proxy_auth = proxy_auth
         self.closed = False
         self.ready = True
         self.channels: dict[int, object] = {}
