@@ -84,7 +84,7 @@ class AgentDefaults(Base):
     max_tool_iterations: int = 200
     max_tool_result_chars: int = 16_000
     max_completion_checks: int = 2
-    context_compact_threshold_tokens: int = 50_000
+    context_compact_threshold_tokens: int = 0  # 0 = auto-compute from context_window_tokens
     provider_retry_mode: Literal["standard", "persistent"] = "standard"
     reasoning_effort: str | None = None  # low / medium / high / adaptive - enables LLM thinking mode
     timezone: str = "UTC"  # IANA timezone, e.g. "Asia/Shanghai", "America/New_York"

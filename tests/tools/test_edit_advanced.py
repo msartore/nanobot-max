@@ -369,8 +369,6 @@ class TestFileSizeProtection:
     async def test_rejects_file_over_size_limit(self, tool, tmp_path):
         f = tmp_path / "huge.txt"
         f.write_text("x", encoding="utf-8")
-        # Monkey-patch the file size check by creating a stat mock
-        original_stat = f.stat
 
         class FakeStat:
             def __init__(self, real_stat):
@@ -384,7 +382,15 @@ class TestFileSizeProtection:
                 return 2 * 1024 * 1024 * 1024  # 2 GiB
 
         import unittest.mock
-        with unittest.mock.patch.object(type(f), 'stat', return_value=FakeStat(f.stat())):
+        from pathlib import Path
+        original_path_stat = Path.stat
+
+        def selective_stat(self, **kwargs):
+            if self.resolve() == f.resolve():
+                return FakeStat(original_path_stat(self))
+            return original_path_stat(self, **kwargs)
+
+        with unittest.mock.patch.object(type(f), 'stat', selective_stat):
             result = await tool.execute(path=str(f), old_text="x", new_text="y")
         assert "Error" in result
         assert "too large" in result.lower() or "size" in result.lower()

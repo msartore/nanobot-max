@@ -34,7 +34,7 @@ from nanobot.command import CommandContext, CommandRouter, register_builtin_comm
 from nanobot.config.schema import AgentDefaults
 from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
-from nanobot.utils.helpers import find_legal_message_start, image_placeholder_text, truncate_text as truncate_text_fn
+from nanobot.utils.helpers import estimate_message_tokens, find_legal_message_start, image_placeholder_text, truncate_text as truncate_text_fn
 from nanobot.utils.runtime import EMPTY_FINAL_RESPONSE_MESSAGE
 
 if TYPE_CHECKING:
@@ -528,13 +528,17 @@ class AgentLoop:
         self._background_tasks.append(task)
         task.add_done_callback(self._background_tasks.remove)
 
-    _COMPACT_KEEP_RECENT = 8  # non-system messages to retain after mid-session compaction
+    _COMPACT_KEEP_RECENT = 8  # minimum non-system messages to retain (guards tiny conversations)
 
     def _make_compact_fn(self):
         """Return an async callable that archives old messages when context is too large.
 
         The callable receives the runner's full message list (system + history),
-        archives the old prefix via the consolidator, and returns system + recent suffix.
+        archives the old prefix via the consolidator (obtaining an LLM summary),
+        then injects that summary as a synthetic exchange at the head of the kept
+        suffix.  This gives the agent continuity — it knows what was done before
+        the kept window — so it does not re-run completed work or treat a new
+        user message as a mid-workflow continuation.
         """
         async def compact_fn(messages: list[dict]) -> list[dict]:
             system_msgs = [m for m in messages if m.get("role") == "system"]
@@ -543,23 +547,54 @@ class AgentLoop:
             if len(non_system) <= self._COMPACT_KEEP_RECENT:
                 return messages
 
-            # Split: keep recent suffix, archive the rest.
-            cut = len(non_system) - self._COMPACT_KEEP_RECENT
-            # Walk backwards from cut to find a user-message boundary.
+            # Keep the most-recent messages that fit within 30% of the context
+            # window.  This is proportional to the actual window rather than a
+            # fixed count, so a 250 k-token session retains ~75 k tokens of
+            # recent history instead of just 8 arbitrary messages.
+            keep_budget = max(8_000, int(self.context_window_tokens * 0.3))
+            kept_tokens = 0
+            cut = 0
+            for i in range(len(non_system) - 1, -1, -1):
+                msg_tokens = estimate_message_tokens(non_system[i])
+                if kept_tokens + msg_tokens > keep_budget:
+                    cut = i + 1
+                    break
+                kept_tokens += msg_tokens
+            else:
+                # Every message fits inside the keep budget — nothing to archive.
+                return messages
+
+            # Snap backward to the nearest user-message boundary so we never
+            # leave the suffix starting mid-turn.
             while cut > 0 and non_system[cut].get("role") != "user":
                 cut -= 1
+
+            if cut == 0:
+                return messages
 
             to_archive = non_system[:cut]
             suffix = non_system[cut:]
 
-            # Ensure no orphan tool results at the start of the kept suffix.
+            # Ensure no orphan tool results at the head of the kept suffix.
             legal_start = find_legal_message_start(suffix)
             if legal_start:
                 to_archive.extend(suffix[:legal_start])
                 suffix = suffix[legal_start:]
 
-            if to_archive:
-                await self.consolidator.archive(to_archive)
+            if not to_archive:
+                return messages
+
+            summary = await self.consolidator.archive(to_archive)
+
+            if summary:
+                # Inject a synthetic exchange so the agent has an explicit
+                # record of what happened before the kept window.  Without
+                # this the agent either re-runs completed tasks or misinterprets
+                # the next user message as a continuation of the archived work.
+                suffix = [
+                    {"role": "user", "content": f"<context_archived>\n{summary}\n</context_archived>"},
+                    {"role": "assistant", "content": "Context noted."},
+                ] + suffix
 
             return system_msgs + suffix
 
@@ -588,7 +623,7 @@ class AgentLoop:
             session = self.sessions.get_or_create(key)
             if self._restore_runtime_checkpoint(session):
                 self.sessions.save(session)
-            await self.consolidator.maybe_consolidate_by_tokens(session)
+            await self.consolidator.maybe_consolidate_by_tokens(session, skip_if_locked=True)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=0)
             history_len = len(history)  # Track before potentially clearing
@@ -625,7 +660,7 @@ class AgentLoop:
         if result := await self.commands.dispatch(ctx):
             return result
 
-        await self.consolidator.maybe_consolidate_by_tokens(session)
+        await self.consolidator.maybe_consolidate_by_tokens(session, skip_if_locked=True)
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
         if message_tool := self.tools.get("message"):

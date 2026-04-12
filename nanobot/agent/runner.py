@@ -875,19 +875,40 @@ class AgentRunner:
     async def _compact_messages_if_needed(
         self, spec: AgentRunSpec, messages: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """Archive old messages via compact_fn when context exceeds the threshold."""
-        if not spec.compact_fn or not spec.context_compact_threshold_tokens:
+        """Archive old messages via compact_fn when context exceeds the threshold.
+
+        When ``context_compact_threshold_tokens`` is 0 (the default), the threshold
+        is auto-computed as 65 % of the snip budget (context_window - max_tokens -
+        safety), which keeps the compact aligned with ``_snip_history`` rather than
+        firing far too early at the old hard-coded 50 k value.
+        """
+        if not spec.compact_fn:
             return messages
+
+        threshold = spec.context_compact_threshold_tokens or 0
+        if threshold == 0:
+            if not spec.context_window_tokens:
+                return messages
+            provider_max = getattr(getattr(self.provider, "generation", None), "max_tokens", 4096)
+            max_out = spec.max_tokens if isinstance(spec.max_tokens, int) else (
+                provider_max if isinstance(provider_max, int) else 4096
+            )
+            snip_budget = max(0, spec.context_window_tokens - max_out - _SNIP_SAFETY_BUFFER)
+            threshold = int(snip_budget * 0.65)
+
+        if threshold <= 0:
+            return messages
+
         estimate, _ = estimate_prompt_tokens_chain(
             self.provider, spec.model, messages, spec.tools.get_definitions()
         )
-        if estimate <= spec.context_compact_threshold_tokens:
+        if estimate <= threshold:
             return messages
         logger.info(
             "Mid-session compact triggered for {} ({} tokens > {} threshold)",
             spec.session_key or "default",
             estimate,
-            spec.context_compact_threshold_tokens,
+            threshold,
         )
         try:
             return await spec.compact_fn(messages)

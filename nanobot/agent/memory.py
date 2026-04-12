@@ -544,16 +544,25 @@ class Consolidator:
             self.store.raw_archive(messages)
             return None
 
-    async def maybe_consolidate_by_tokens(self, session: Session) -> None:
+    async def maybe_consolidate_by_tokens(self, session: Session, *, skip_if_locked: bool = False) -> None:
         """Loop: archive old messages until prompt fits within safe budget.
 
         The budget reserves space for completion tokens and a safety buffer
         so the LLM request never exceeds the context window.
+
+        Args:
+            skip_if_locked: If True and a consolidation is already in progress for this
+                session (e.g. a background task), return immediately rather than blocking.
+                Used by the foreground path so a new message is not held up by a background
+                consolidation that was triggered by the previous turn.
         """
         if not session.messages or self.context_window_tokens <= 0:
             return
 
         lock = self.get_lock(session.key)
+        if skip_if_locked and lock.locked():
+            logger.debug("Token consolidation skipped (already in progress) for {}", session.key)
+            return
         async with lock:
             budget = self.context_window_tokens - self.max_completion_tokens - self._SAFETY_BUFFER
             target = budget // 2
