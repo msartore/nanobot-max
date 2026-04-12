@@ -34,7 +34,7 @@ from nanobot.command import CommandContext, CommandRouter, register_builtin_comm
 from nanobot.config.schema import AgentDefaults
 from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
-from nanobot.utils.helpers import image_placeholder_text, truncate_text as truncate_text_fn
+from nanobot.utils.helpers import find_legal_message_start, image_placeholder_text, truncate_text as truncate_text_fn
 from nanobot.utils.runtime import EMPTY_FINAL_RESPONSE_MESSAGE
 
 if TYPE_CHECKING:
@@ -397,6 +397,7 @@ class AgentLoop:
             context_window_tokens=self.context_window_tokens,
             context_block_limit=self.context_block_limit,
             context_compact_threshold_tokens=self.context_compact_threshold_tokens,
+            compact_fn=self._make_compact_fn() if self.context_compact_threshold_tokens else None,
             provider_retry_mode=self.provider_retry_mode,
             progress_callback=on_progress,
             checkpoint_callback=_checkpoint,
@@ -520,6 +521,43 @@ class AgentLoop:
         task = asyncio.create_task(coro)
         self._background_tasks.append(task)
         task.add_done_callback(self._background_tasks.remove)
+
+    _COMPACT_KEEP_RECENT = 8  # non-system messages to retain after mid-session compaction
+
+    def _make_compact_fn(self):
+        """Return an async callable that archives old messages when context is too large.
+
+        The callable receives the runner's full message list (system + history),
+        archives the old prefix via the consolidator, and returns system + recent suffix.
+        """
+        async def compact_fn(messages: list[dict]) -> list[dict]:
+            system_msgs = [m for m in messages if m.get("role") == "system"]
+            non_system = [m for m in messages if m.get("role") != "system"]
+
+            if len(non_system) <= self._COMPACT_KEEP_RECENT:
+                return messages
+
+            # Split: keep recent suffix, archive the rest.
+            cut = len(non_system) - self._COMPACT_KEEP_RECENT
+            # Walk backwards from cut to find a user-message boundary.
+            while cut > 0 and non_system[cut].get("role") != "user":
+                cut -= 1
+
+            to_archive = non_system[:cut]
+            suffix = non_system[cut:]
+
+            # Ensure no orphan tool results at the start of the kept suffix.
+            legal_start = find_legal_message_start(suffix)
+            if legal_start:
+                to_archive.extend(suffix[:legal_start])
+                suffix = suffix[legal_start:]
+
+            if to_archive:
+                await self.consolidator.archive(to_archive)
+
+            return system_msgs + suffix
+
+        return compact_fn
 
     def stop(self) -> None:
         """Stop the agent loop."""

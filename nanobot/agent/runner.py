@@ -65,6 +65,7 @@ class AgentRunSpec:
     context_window_tokens: int | None = None
     context_block_limit: int | None = None
     context_compact_threshold_tokens: int | None = None
+    compact_fn: Any | None = None  # Callable[[list[dict]], Awaitable[list[dict]]] | None
     provider_retry_mode: str = "standard"
     progress_callback: Any | None = None
     checkpoint_callback: Any | None = None
@@ -114,10 +115,19 @@ class AgentRunner:
                 messages = self._backfill_missing_tool_results(messages)
                 messages = self._microcompact(messages)
                 messages = self._apply_tool_result_budget(spec, messages)
-                messages_for_model = self._snip_history(spec, messages)
             except Exception as exc:
                 logger.warning(
                     "Context governance failed on turn {} for {}: {}; using raw messages",
+                    iteration,
+                    spec.session_key or "default",
+                    exc,
+                )
+            messages = await self._compact_messages_if_needed(spec, messages)
+            try:
+                messages_for_model = self._snip_history(spec, messages)
+            except Exception as exc:
+                logger.warning(
+                    "History snip failed on turn {} for {}: {}; using raw messages",
                     iteration,
                     spec.session_key or "default",
                     exc,
@@ -840,6 +850,29 @@ class AgentRunner:
             })
             offset += 1
         return updated
+
+    async def _compact_messages_if_needed(
+        self, spec: AgentRunSpec, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Archive old messages via compact_fn when context exceeds the threshold."""
+        if not spec.compact_fn or not spec.context_compact_threshold_tokens:
+            return messages
+        estimate, _ = estimate_prompt_tokens_chain(
+            self.provider, spec.model, messages, spec.tools.get_definitions()
+        )
+        if estimate <= spec.context_compact_threshold_tokens:
+            return messages
+        logger.info(
+            "Mid-session compact triggered for {} ({} tokens > {} threshold)",
+            spec.session_key or "default",
+            estimate,
+            spec.context_compact_threshold_tokens,
+        )
+        try:
+            return await spec.compact_fn(messages)
+        except Exception:
+            logger.warning("Mid-session compact failed for {}; continuing with full context", spec.session_key or "default")
+            return messages
 
     @staticmethod
     def _microcompact(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
