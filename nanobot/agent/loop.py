@@ -172,6 +172,7 @@ class AgentLoop:
         disabled_skills: list[str] | None = None,
         session_ttl_minutes: int = 0,
         context_files: list[str] | None = None,
+        summarize_history: bool = False,
     ):
         from nanobot.config.schema import ExecToolConfig, WebToolsConfig
 
@@ -237,6 +238,7 @@ class AgentLoop:
         )
 
         self._unified_session = unified_session
+        self._summarize_history = summarize_history
         self._running = False
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
@@ -606,6 +608,20 @@ class AgentLoop:
         self._running = False
         logger.info("Agent loop stopping")
 
+    _HISTORY_SUMMARY_KEY = "history_summary"
+
+    async def _refresh_history_summary(self, session: Session) -> None:
+        """Regenerate the cached history summary from the current session messages."""
+        history = session.get_history(max_messages=0)
+        if not history:
+            session.metadata.pop(self._HISTORY_SUMMARY_KEY, None)
+            self.sessions.save(session)
+            return
+        summary = await self.consolidator.archive(history)
+        if summary:
+            session.metadata[self._HISTORY_SUMMARY_KEY] = summary
+            self.sessions.save(session)
+
     async def _process_message(
         self,
         msg: InboundMessage,
@@ -672,12 +688,22 @@ class AgentLoop:
         history_len = len(history)  # Track before potentially clearing
         history = self._maybe_initialize_context_summary(history)
 
-        initial_messages = self.context.build_messages(
-            history=history,
-            current_message=msg.content,
-            media=msg.media if msg.media else None,
-            channel=msg.channel, chat_id=msg.chat_id,
-        )
+        if self._summarize_history:
+            cached_summary = session.metadata.get(self._HISTORY_SUMMARY_KEY)
+            initial_messages = self.context.build_messages(
+                history=[] if cached_summary else history,
+                current_message=msg.content,
+                media=msg.media if msg.media else None,
+                channel=msg.channel, chat_id=msg.chat_id,
+                session_summary=cached_summary or None,
+            )
+        else:
+            initial_messages = self.context.build_messages(
+                history=history,
+                current_message=msg.content,
+                media=msg.media if msg.media else None,
+                channel=msg.channel, chat_id=msg.chat_id,
+            )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False, tool_results: bool = False) -> None:
             meta = dict(msg.metadata or {})
@@ -705,6 +731,8 @@ class AgentLoop:
         self._clear_runtime_checkpoint(session)
         self.sessions.save(session)
         self._schedule_background(self.consolidator.maybe_consolidate_by_tokens(session))
+        if self._summarize_history:
+            self._schedule_background(self._refresh_history_summary(session))
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             # Message tool already sent content - don't send duplicate final response
