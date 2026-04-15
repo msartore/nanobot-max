@@ -20,11 +20,12 @@ class ContextBuilder:
     _MAX_RECENT_HISTORY = 50
     _RUNTIME_CONTEXT_END = "[/Runtime Context]"
 
-    def __init__(self, workspace: Path, timezone: str | None = None, disabled_skills: list[str] | None = None):
+    def __init__(self, workspace: Path, timezone: str | None = None, disabled_skills: list[str] | None = None, context_files: list[str] | None = None):
         self.workspace = workspace
         self.timezone = timezone
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace, disabled_skills=set(disabled_skills) if disabled_skills else None)
+        self._context_files = context_files  # None = default MEMORY.md; [] = no injection; list = glob patterns
 
     def build_system_prompt(
         self,
@@ -46,9 +47,14 @@ class ContextBuilder:
         if bootstrap:
             stable_parts.append(bootstrap)
 
-        memory = self.memory.get_memory_context()
-        if memory:
-            stable_parts.append(f"# Memory\n\n{memory}")
+        if self._context_files is not None:
+            mem = self._load_context_files()
+            if mem:
+                stable_parts.append(f"# Memory\n\n{mem}")
+        else:
+            memory = self.memory.get_memory_context()
+            if memory:
+                stable_parts.append(f"# Memory\n\n{memory}")
 
         always_skills = self.skills.get_always_skills()
         if always_skills:
@@ -97,6 +103,17 @@ class ContextBuilder:
             platform_policy=render_template("agent/platform_policy.md", system=system),
             channel=channel or "",
         )
+
+    def _load_context_files(self) -> str:
+        """Load and concatenate files matched by the configured glob patterns."""
+        parts = []
+        for pattern in (self._context_files or []):
+            for path in sorted(self.workspace.glob(pattern)):
+                if path.is_file():
+                    content = path.read_text(encoding="utf-8").strip()
+                    if content:
+                        parts.append(f"## {path.name}\n\n{content}")
+        return "\n\n".join(parts)
 
     @staticmethod
     def _build_runtime_context(

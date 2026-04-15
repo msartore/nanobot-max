@@ -171,6 +171,7 @@ class AgentLoop:
         unified_session: bool = False,
         disabled_skills: list[str] | None = None,
         session_ttl_minutes: int = 0,
+        context_files: list[str] | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebToolsConfig
 
@@ -219,7 +220,7 @@ class AgentLoop:
         self._last_usage: dict[str, int] = {}
         self._extra_hooks: list[AgentHook] = hooks or []
 
-        self.context = ContextBuilder(workspace, timezone=timezone, disabled_skills=disabled_skills)
+        self.context = ContextBuilder(workspace, timezone=timezone, disabled_skills=disabled_skills, context_files=context_files)
         self.session_ttl_minutes = session_ttl_minutes
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()

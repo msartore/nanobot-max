@@ -84,6 +84,7 @@ class Nanobot:
             timezone=defaults.timezone,
             max_completion_checks=defaults.max_completion_checks,
             context_compact_threshold_tokens=defaults.context_compact_threshold_tokens,
+            context_files=defaults.context_files,
         )
         return cls(loop)
 

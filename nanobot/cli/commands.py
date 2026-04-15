@@ -621,6 +621,7 @@ def serve(
         context_compact_threshold_tokens=runtime_config.agents.defaults.context_compact_threshold_tokens,
         disabled_skills=runtime_config.agents.defaults.disabled_skills,
         session_ttl_minutes=runtime_config.agents.defaults.session_ttl_minutes,
+        context_files=runtime_config.agents.defaults.context_files,
     )
 
     model_name = runtime_config.agents.defaults.model
@@ -717,6 +718,7 @@ def gateway(
         context_compact_threshold_tokens=config.agents.defaults.context_compact_threshold_tokens,
         disabled_skills=config.agents.defaults.disabled_skills,
         session_ttl_minutes=config.agents.defaults.session_ttl_minutes,
+        context_files=config.agents.defaults.context_files,
     )
 
     # Set cron callback (needs agent)
@@ -961,6 +963,7 @@ def agent(
         context_compact_threshold_tokens=config.agents.defaults.context_compact_threshold_tokens,
         disabled_skills=config.agents.defaults.disabled_skills,
         session_ttl_minutes=config.agents.defaults.session_ttl_minutes,
+        context_files=config.agents.defaults.context_files,
     )
     restart_notice = consume_restart_notice_from_env()
     if restart_notice and should_show_cli_restart_notice(restart_notice, session_id):
