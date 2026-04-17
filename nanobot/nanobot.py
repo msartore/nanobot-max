@@ -86,6 +86,10 @@ class Nanobot:
             context_compact_threshold_tokens=defaults.context_compact_threshold_tokens,
             context_files=defaults.context_files,
             summarize_history=defaults.summarize_history,
+            unified_session=defaults.unified_session,
+            disabled_skills=defaults.disabled_skills,
+            session_ttl_minutes=defaults.session_ttl_minutes,
+            tools_config=config.tools,
         )
         return cls(loop)
 

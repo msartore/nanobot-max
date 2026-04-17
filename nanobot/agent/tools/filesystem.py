@@ -2,6 +2,7 @@
 
 import difflib
 import mimetypes
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -124,9 +125,22 @@ def _is_blocked_device(path: str | Path) -> bool:
     import re
 
     raw = str(path)
-    if raw in _BLOCKED_DEVICE_PATHS:
+
+    # Resolve symlinks to check the actual target
+    try:
+        resolved = str(Path(raw).resolve())
+    except (OSError, ValueError):
+        resolved = raw
+
+    if raw in _BLOCKED_DEVICE_PATHS or resolved in _BLOCKED_DEVICE_PATHS:
         return True
     if re.match(r"/proc/\d+/fd/[012]$", raw) or re.match(r"/proc/self/fd/[012]$", raw):
+        return True
+    if re.match(r"/proc/\d+/fd/[012]$", resolved) or re.match(r"/proc/self/fd/[012]$", resolved):
+        return True
+
+    # Check if resolved path starts with /dev/ (covers symlinks to devices)
+    if resolved.startswith("/dev/"):
         return True
     return False
 
@@ -229,10 +243,22 @@ class ReadFileTool(_FsTool):
                     f"message(content='Here is the file', media=['{path}'])"
                 )
 
+            # Read the file content after dedup check
+            raw = fp.read_bytes()
             try:
                 text_content = raw.decode("utf-8")
             except UnicodeDecodeError:
+                # Binary file - return error message
+                mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
+                if mime and mime.startswith("image/"):
+                    return build_image_content_blocks(raw, mime, str(fp), f"(Image file: {path})")
                 return f"Error: Cannot read binary file {path} (MIME: {mime or 'unknown'}). Only UTF-8 text and images are supported."
+
+            # Normalize CRLF -> LF before line-splitting. Primarily a Windows
+            # concern (git checkouts with autocrlf, editors saving CRLF) but
+            # applied on all platforms so downstream StrReplace/Grep behavior
+            # is consistent regardless of where the file was written.
+            text_content = text_content.replace("\r\n", "\n")
 
             all_lines = text_content.splitlines()
             total = len(all_lines)

@@ -546,13 +546,23 @@ async def test_exec_always_returns_exit_code() -> None:
     assert "hello" in result
 
 
-async def test_exec_head_tail_truncation(tmp_path: Path) -> None:
+async def test_exec_head_tail_truncation(tmp_path) -> None:
     """Long output should preserve both head and tail."""
     tool = ExecTool()
-    script = 'print("A" * 6000); print("B" * 6000)'
-    script_file = tmp_path / "test_script.py"
-    script_file.write_text(script, encoding="utf-8")
-    command = f"{sys.executable} {script_file}"
+    # Generate output that exceeds _MAX_OUTPUT (10_000 chars).
+    # Use a temp script file so the output-generating logic lives in a file
+    # (Windows cmd.exe has finicky rules for quoting `-c` payloads with
+    # embedded newlines). ExecTool runs via create_subprocess_shell, so we
+    # must quote *both* the interpreter path and the script path — tmp_path
+    # on some CI runners and on many local Windows installs contains spaces
+    # (e.g. C:\Users\John Doe\AppData\...) which would otherwise break the
+    # shell's argv split.
+    script_file = tmp_path / "gen_output.py"
+    script_file.write_text("print('A' * 6000 + chr(10) + 'B' * 6000)", encoding="utf-8")
+    if sys.platform == "win32":
+        command = subprocess.list2cmdline([sys.executable, str(script_file)])
+    else:
+        command = f"{shlex.quote(sys.executable)} {shlex.quote(str(script_file))}"
     result = await tool.execute(command=command)
     assert "chars truncated" in result
     assert result.startswith("A")

@@ -3,6 +3,7 @@
 import base64
 import mimetypes
 import platform
+from importlib.resources import files as pkg_files
 from pathlib import Path
 from typing import Any
 
@@ -62,7 +63,7 @@ class ContextBuilder:
             if always_content:
                 stable_parts.append(f"# Active Skills\n\n{always_content}")
 
-        skills_summary = self.skills.build_skills_summary()
+        skills_summary = self.skills.build_skills_summary(exclude=set(always_skills))
         if skills_summary:
             stable_parts.append(render_template("agent/skills_section.md", skills_summary=skills_summary))
 
@@ -154,6 +155,17 @@ class ContextBuilder:
 
         return "\n\n".join(parts) if parts else ""
 
+    @staticmethod
+    def _is_template_content(content: str, template_path: str) -> bool:
+        """Check if *content* is identical to the bundled template (user hasn't customized it)."""
+        try:
+            tpl = pkg_files("nanobot") / "templates" / template_path
+            if tpl.is_file():
+                return content.strip() == tpl.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+        return False
+
     def build_messages(
         self,
         history: list[dict[str, Any]],
@@ -198,7 +210,6 @@ class ContextBuilder:
             if not p.is_file():
                 continue
             raw = p.read_bytes()
-            # Detect real MIME type from magic bytes; fallback to filename guess
             mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
             if not mime or not mime.startswith("image/"):
                 continue

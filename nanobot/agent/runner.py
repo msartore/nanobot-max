@@ -92,6 +92,8 @@ class AgentRunner:
     def __init__(self, provider: LLMProvider):
         self.provider = provider
 
+
+
     async def run(self, spec: AgentRunSpec) -> AgentRunResult:
         hook = spec.hook or AgentHook()
         messages = list(spec.initial_messages)
@@ -146,7 +148,7 @@ class AgentRunner:
             context.tool_calls = list(response.tool_calls)
             self._accumulate_usage(usage, raw_usage)
 
-            if response.has_tool_calls:
+            if response.should_execute_tools:
                 if hook.wants_streaming():
                     await hook.on_stream_end(context, resuming=True)
 
@@ -220,6 +222,13 @@ class AgentRunner:
                 await hook.after_tool_results(context)
                 await hook.after_iteration(context)
                 continue
+
+            if response.has_tool_calls:
+                logger.warning(
+                    "Ignoring tool calls under finish_reason='{}' for {}",
+                    response.finish_reason,
+                    spec.session_key or "default",
+                )
 
             clean = hook.finalize_content(context, response.content)
 
@@ -1032,6 +1041,16 @@ class AgentRunner:
                 if message.get("role") == "user":
                     kept = kept[i:]
                     break
+            else:
+                # Recover nearest user message from outside the kept window;
+                # GLM rejects system→assistant (error 1214).  Budget is
+                # intentionally exceeded — oversized beats invalid.
+                for idx in range(len(non_system) - 1, -1, -1):
+                    if non_system[idx].get("role") == "user":
+                        kept = non_system[idx:]
+                        break
+                # If no user exists at all, _enforce_role_alternation
+                # will insert a synthetic one as a safety net.
             start = find_legal_message_start(kept)
             if start:
                 kept = kept[start:]

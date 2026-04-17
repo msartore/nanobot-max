@@ -6,6 +6,8 @@ import re
 import shutil
 from pathlib import Path
 
+import yaml
+
 # Default builtin skills directory (relative to this file)
 BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
@@ -14,10 +16,6 @@ _STRIP_SKILL_FRONTMATTER = re.compile(
     r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n?",
     re.DOTALL,
 )
-
-
-def _escape_xml(text: str) -> str:
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 class SkillsLoader:
@@ -116,15 +114,18 @@ class SkillsLoader:
         ]
         return "\n\n---\n\n".join(parts)
 
-    def build_skills_summary(self) -> str:
+    def build_skills_summary(self, exclude: set[str] | None = None) -> str:
         """
         Build a summary of all skills (name, description, path, availability).
 
         This is used for progressive loading - the agent can read the full
         skill content using read_file when needed.
 
+        Args:
+            exclude: Set of skill names to omit from the summary.
+
         Returns:
-            XML-formatted skills summary.
+            Markdown-formatted skills summary.
         """
         all_skills = self.list_skills(filter_unavailable=False)
         if not all_skills:
@@ -136,6 +137,8 @@ class SkillsLoader:
         lines = ["<skills>"]
         for s in all_skills:
             name = escape_xml(s["name"])
+            if exclude and s["name"] in exclude:
+                continue
             path = Path(s["path"]).as_posix()
             base_dir = escape_xml(Path(s["path"]).parent.as_posix())
             desc = escape_xml(self._get_skill_description(s["name"]))
@@ -152,7 +155,7 @@ class SkillsLoader:
             if not available:
                 missing = self._get_missing_requirements(skill_meta)
                 if missing:
-                    lines.append(f"    <requires>{_escape_xml(missing)}</requires>")
+                    lines.append(f"    <requires>{escape_xml(missing)}</requires>")
             lines.append("  </skill>")
         lines.append("</skills>")
         return "\n".join(lines)
@@ -183,11 +186,19 @@ class SkillsLoader:
             return content[match.end():].strip()
         return content
 
-    def _parse_nanobot_metadata(self, raw: str) -> dict:
-        """Parse skill metadata JSON from frontmatter (supports nanobot and openclaw keys)."""
-        try:
-            data = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
+    def _parse_nanobot_metadata(self, raw: object) -> dict:
+        """Extract nanobot/openclaw metadata from a frontmatter field.
+
+        ``raw`` may be a dict (already parsed by yaml.safe_load) or a JSON str.
+        """
+        if isinstance(raw, dict):
+            data = raw
+        elif isinstance(raw, str):
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                return {}
+        else:
             return {}
         if not isinstance(data, dict):
             return {}
@@ -205,8 +216,8 @@ class SkillsLoader:
 
     def _get_skill_meta(self, name: str) -> dict:
         """Get nanobot metadata for a skill (cached in frontmatter)."""
-        meta = self.get_skill_metadata(name) or {}
-        return self._parse_nanobot_metadata(meta.get("metadata", ""))
+        raw_meta = self.get_skill_metadata(name) or {}
+        return self._parse_nanobot_metadata(raw_meta.get("metadata"))
 
     def get_always_skills(self) -> list[str]:
         """Get skills marked as always=true that meet requirements."""
@@ -215,7 +226,7 @@ class SkillsLoader:
             for entry in self.list_skills(filter_unavailable=True)
             if (meta := self.get_skill_metadata(entry["name"]) or {})
             and (
-                self._parse_nanobot_metadata(meta.get("metadata", "")).get("always")
+                self._parse_nanobot_metadata(meta.get("metadata")).get("always")
                 or meta.get("always")
             )
         ]
@@ -234,44 +245,57 @@ class SkillsLoader:
         if not content or not content.startswith("---"):
             return None
 
-        if content.startswith("---"):
-            match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
-            if match:
-                frontmatter = match.group(1)
-                # Simple line-by-line YAML parsing for scalar values
-                metadata: dict = {}
-                for line in frontmatter.split("\n"):
-                    if ":" in line and not line.startswith(" ") and not line.startswith("\t"):
-                        key, value = line.split(":", 1)
-                        metadata[key.strip()] = value.strip().strip('"\'')
-                # The metadata field may have a multi-line JSON value that the
-                # simple parser missed (value captured as empty string).
-                # Re-parse it by extracting the raw JSON block from the frontmatter.
-                if not metadata.get("metadata"):
-                    json_block = self._extract_multiline_json(frontmatter, "metadata")
-                    if json_block:
-                        metadata["metadata"] = json_block
-                return metadata
+        # Try yaml.safe_load first for proper type handling (bool, int, folded strings)
+        match = _STRIP_SKILL_FRONTMATTER.match(content)
+        if match:
+            try:
+                parsed = yaml.safe_load(match.group(1))
+                if isinstance(parsed, dict):
+                    metadata: dict = {}
+                    for k, v in parsed.items():
+                        metadata[str(k)] = v
+                    # If metadata field is empty/None, try extracting multiline JSON
+                    if not metadata.get("metadata"):
+                        frontmatter_match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
+                        if frontmatter_match:
+                            json_block = self._extract_multiline_json(frontmatter_match.group(1), "metadata")
+                            if json_block:
+                                metadata["metadata"] = json_block
+                    return metadata
+            except yaml.YAMLError:
+                pass
+
+        # Fallback to simple line-by-line parsing
+        simple_match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
+        if simple_match:
+            frontmatter = simple_match.group(1)
+            metadata = {}
+            for line in frontmatter.split("\n"):
+                if ":" in line and not line.startswith(" ") and not line.startswith("\t"):
+                    key, value = line.split(":", 1)
+                    metadata[key.strip()] = value.strip().strip('"\'')
+            if not metadata.get("metadata"):
+                json_block = self._extract_multiline_json(frontmatter, "metadata")
+                if json_block:
+                    metadata["metadata"] = json_block
+            return metadata
 
         return None
 
     @staticmethod
     def _extract_multiline_json(frontmatter: str, key: str) -> str:
         """Extract a multi-line JSON value for a given top-level YAML key."""
-        # Find the key line (unindented)
         key_pattern = re.compile(r"^" + re.escape(key) + r"\s*:\s*$", re.MULTILINE)
         key_match = key_pattern.search(frontmatter)
         if not key_match:
             return ""
-        # Collect lines after the key until we leave the indented block
         rest = frontmatter[key_match.end():]
         block_lines = []
         for line in rest.splitlines():
             if line and not line[0].isspace():
-                break  # Back to a top-level key — stop
+                break
             block_lines.append(line)
         raw = "\n".join(block_lines).strip()
-        # Validate it parses as JSON (strip trailing commas which YAML allows)
         cleaned = re.sub(r",\s*([\]}])", r"\1", raw)
         try:
             json.loads(cleaned)
