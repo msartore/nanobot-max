@@ -92,6 +92,7 @@ class AgentDefaults(Base):
     disabled_skills: list[str] = Field(default_factory=list)  # Skill names to exclude from loading (e.g. ["summarize", "skill-creator"])
     context_files: list[str] | None = None  # Glob patterns (relative to workspace) for context injection; None = default MEMORY.md behaviour
     summarize_history: bool = False  # Replace full session history with a cached LLM summary each turn
+    message_timeout_seconds: int = 0  # Per-message wall-clock timeout in seconds (0 = disabled)
     session_ttl_minutes: int = Field(
         default=0,
         ge=0,

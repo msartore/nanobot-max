@@ -173,6 +173,7 @@ class AgentLoop:
         session_ttl_minutes: int = 0,
         context_files: list[str] | None = None,
         summarize_history: bool = False,
+        message_timeout: int = 0,
     ):
         from nanobot.config.schema import ExecToolConfig, WebToolsConfig
 
@@ -239,6 +240,7 @@ class AgentLoop:
 
         self._unified_session = unified_session
         self._summarize_history = summarize_history
+        self._message_timeout = message_timeout
         self._running = False
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
@@ -462,6 +464,7 @@ class AgentLoop:
         async with lock, gate:
             try:
                 on_stream = on_stream_end = None
+                _timeout = self._message_timeout if self._message_timeout > 0 else None
                 if msg.metadata.get("_wants_stream"):
                     # Split one answer into distinct stream segments.
                     stream_base_id = f"{msg.session_key}:{time.time_ns()}"
@@ -493,9 +496,20 @@ class AgentLoop:
                         ))
                         stream_segment += 1
 
-                response = await self._process_message(
-                    msg, on_stream=on_stream, on_stream_end=on_stream_end,
-                )
+                try:
+                    response = await asyncio.wait_for(
+                        self._process_message(msg, on_stream=on_stream, on_stream_end=on_stream_end),
+                        timeout=_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Message timeout ({}s) for session {}", self._message_timeout, msg.session_key
+                    )
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=msg.channel, chat_id=msg.chat_id,
+                        content=f"Sorry, your request timed out after {self._message_timeout} seconds. Please try a simpler request.",
+                    ))
+                    return
                 if response is not None:
                     await self.bus.publish_outbound(response)
                 elif msg.channel == "cli":
@@ -683,6 +697,9 @@ class AgentLoop:
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
+
+        from nanobot.agent.tools import file_state as _file_state
+        _file_state.clear()
 
         history = session.get_history(max_messages=0)
         history_len = len(history)  # Track before potentially clearing

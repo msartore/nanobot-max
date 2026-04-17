@@ -721,6 +721,7 @@ def gateway(
         session_ttl_minutes=config.agents.defaults.session_ttl_minutes,
         context_files=config.agents.defaults.context_files,
         summarize_history=config.agents.defaults.summarize_history,
+        message_timeout=config.agents.defaults.message_timeout_seconds,
     )
 
     # Set cron callback (needs agent)
