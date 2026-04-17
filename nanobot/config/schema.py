@@ -225,7 +225,7 @@ class XSearchConfig(Base):
 
     enable: bool = False
     api_key: str = ""  # xAI API key; falls back to XAI_API_KEY env var
-    model: str = "grok-3"
+    model: str = "grok-4-0709"
 
 
 class MyToolConfig(Base):
